@@ -1,4 +1,5 @@
 import type {
+  TokenLedger,
   ToolCall,
   ToolName,
   ToolResult,
@@ -622,6 +623,70 @@ function renderRows(rows: Array<[string, string]>, width: number): string[] {
       ),
     ];
   });
+}
+
+export function emptyLedger(): TokenLedger {
+  return {
+    calls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    last: null,
+    peakPromptTokens: 0,
+    contextTokens: 0,
+  };
+}
+
+/**
+ * What the session has spent. The context line reports the peak prompt rather
+ * than the running total, because the window is what a long session actually
+ * runs out of, and only the prompt counts against it.
+ */
+export function renderTokens(ledger: TokenLedger, width: number): string[] {
+  if (ledger.calls === 0) {
+    return renderNote(
+      "No model calls yet, so there is nothing to count.",
+      width,
+    );
+  }
+
+  const rows: Array<[string, string]> = [
+    [
+      "session",
+      `${formatTokens(ledger.totalTokens)} over ${formatCount(ledger.calls, "model call")}` +
+        ` · ${formatTokens(ledger.promptTokens)} in, ${formatTokens(ledger.completionTokens)} out`,
+    ],
+  ];
+
+  if (ledger.last) {
+    rows.push([
+      "last call",
+      `${formatTokens(ledger.last.totalTokens)} · ${formatTokens(ledger.last.promptTokens)} in, ${formatTokens(ledger.last.completionTokens)} out`,
+    ]);
+  }
+  rows.push([
+    "average",
+    `${formatTokens(Math.round(ledger.totalTokens / ledger.calls))} per call`,
+  ]);
+
+  if (ledger.contextTokens > 0) {
+    const share = Math.min(
+      100,
+      Math.round((ledger.peakPromptTokens / ledger.contextTokens) * 100),
+    );
+    rows.push([
+      "context",
+      `${formatTokens(ledger.peakPromptTokens)} peak prompt of ${formatTokens(ledger.contextTokens)} (${share}%)`,
+    ]);
+  }
+
+  return [
+    "",
+    `${BODY}${tone.heading("Tokens")}`,
+    "",
+    ...renderRows(rows, width),
+    "",
+  ];
 }
 
 export function renderHelp(width: number): string[] {

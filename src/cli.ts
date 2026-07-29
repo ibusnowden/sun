@@ -496,6 +496,7 @@ In a session:
   /plan                       Investigate and propose without changing anything
   /model                      Switch the model for the next turn
   /approvals                  Ask before each command, or run straight through
+  /tokens                     Show what this session has spent
   /diff  /files  /help        Inspect the run
   esc                         Interrupt, keeping the partial transcript
 

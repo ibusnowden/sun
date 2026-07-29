@@ -31,6 +31,7 @@ export const SLASH_COMMANDS: readonly CompletionItem[] = [
   { value: "model", detail: "choose which model Sun runs on" },
   { value: "approvals", detail: "choose what Sun may run without asking" },
   { value: "plan", detail: "investigate and propose without changing anything" },
+  { value: "tokens", detail: "show what this session has spent" },
   { value: "diff", detail: "print the full working diff" },
   { value: "files", detail: "list files Sun has touched" },
   { value: "help", detail: "show this list" },

@@ -69,6 +69,21 @@ export interface ModelUsage {
   contextTokens: number;
 }
 
+/** Session token accounting, accumulated from every model call. */
+export interface TokenLedger {
+  /** Model calls that reported usage. */
+  calls: number;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  /** The most recent call, for "what did that turn cost me". */
+  last: ModelUsage | null;
+  /** Largest prompt seen, which is what actually approaches the window. */
+  peakPromptTokens: number;
+  /** Window size the provider reported; 0 when nothing has been reported. */
+  contextTokens: number;
+}
+
 export interface ProviderObserver {
   onPhaseStart?(phase: ModelPhase): void;
   onThinking?(phase: ModelPhase, delta: string): void;

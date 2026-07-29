@@ -4,6 +4,7 @@ import type {
   ApprovalRequest,
   EventSink,
   ModelUsage,
+  TokenLedger,
   ProviderObserver,
   RunMode,
   RunResult,
@@ -37,6 +38,7 @@ import {
 } from "./select.ts";
 import {
   describeCall,
+  emptyLedger,
   goalBadge,
   renderAssistant,
   renderDiffSummary,
@@ -50,6 +52,7 @@ import {
   renderNote,
   renderPatch,
   renderTask,
+  renderTokens,
   renderToolChange,
   renderToolEnd,
 } from "./transcript.ts";
@@ -144,6 +147,7 @@ export class TerminalUI implements ApprovalHandler {
   #pendingCall: ToolCall | null = null;
   #suppressNextInlineDiff = false;
   #totalTokens = 0;
+  #ledger: TokenLedger = emptyLedger();
   #queued: string[] = [];
   #select: PendingSelect | null = null;
   /** "ask" stops at every command; "auto" runs them inside the sandbox. */
@@ -477,6 +481,20 @@ export class TerminalUI implements ApprovalHandler {
   #recordUsage(usage: ModelUsage | null): void {
     if (!usage) return;
     this.#totalTokens += usage.totalTokens;
+    this.#ledger = {
+      calls: this.#ledger.calls + 1,
+      promptTokens: this.#ledger.promptTokens + usage.promptTokens,
+      completionTokens: this.#ledger.completionTokens + usage.completionTokens,
+      totalTokens: this.#totalTokens,
+      last: usage,
+      peakPromptTokens: Math.max(
+        this.#ledger.peakPromptTokens,
+        usage.promptTokens,
+      ),
+      // A provider that reports 0 does not know its window; keep the last
+      // real number rather than overwriting it with a non-answer.
+      contextTokens: usage.contextTokens || this.#ledger.contextTokens,
+    };
   }
 
   #trackFile(call: ToolCall, status: FileActivity["status"]): void {
@@ -822,6 +840,10 @@ export class TerminalUI implements ApprovalHandler {
         break;
       case "plan":
         this.#planCommand();
+        break;
+      case "tokens":
+      case "usage":
+        this.#write(renderTokens(this.#ledger, width));
         break;
       case "diff":
         this.#write(

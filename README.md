@@ -209,7 +209,8 @@ finishes. `HOME` points at a throwaway directory on the sandbox tmpfs, so tools
 that cache or log into `~` leave the workspace clean and Sun's change summary
 only reports your own edits. Terminal-bound model and command text is sanitized before display.
 
-Available slash commands are `/goal`, `/plan`, `/model`, `/approvals`, `/diff`,
+Available slash commands are `/goal`, `/plan`, `/model`, `/approvals`,
+`/tokens`, `/diff`,
 `/files`, `/help`, `/clear`, and `/quit`. Typing `/` at the start of a line
 lists them under the composer, and `@` anywhere completes a workspace path;
 `↑`/`↓` move through the menu and `tab` accepts the highlight. Completing a
@@ -220,6 +221,12 @@ file, so `@` never quietly spends your context window.
 `sun doctor` prints, and switches the next turn onto the chosen one without
 touching the conversation. `/approvals` chooses whether Sun stops before each
 command; the sandbox applies either way.
+
+`/tokens` (also `/usage`) breaks down what the session has spent: the running
+total and prompt/completion split, the last call on its own, the per-call
+average, and the peak prompt as a share of the context window. The context line
+reports the peak prompt rather than the total, because only the prompt counts
+against the window and the peak is what a long session actually runs out of.
 
 The live transcript shows a compact preview after each changed patch; `/diff`
 prints the full cumulative patch. Assistant replies are rendered as Markdown:

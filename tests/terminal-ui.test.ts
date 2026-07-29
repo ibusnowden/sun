@@ -502,6 +502,54 @@ describe("TerminalUI", () => {
     ui.stop();
   });
 
+  test("/tokens totals the session and reports the peak against the window", () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.beginRun("do the work");
+    ui.handle({
+      type: "model_end",
+      phase: "decide",
+      durationMs: 1_000,
+      usage: {
+        promptTokens: 8_000,
+        completionTokens: 500,
+        totalTokens: 8_500,
+        contextTokens: 100_000,
+      },
+      failed: false,
+    });
+    ui.handle({
+      type: "model_end",
+      phase: "decide",
+      durationMs: 1_000,
+      usage: {
+        promptTokens: 12_000,
+        completionTokens: 1_500,
+        totalTokens: 13_500,
+        contextTokens: 100_000,
+      },
+      failed: false,
+    });
+
+    ui.feedKeys("/tokens\r");
+    const shown = text();
+    expect(shown).toContain("22k over 2 model calls");
+    expect(shown).toContain("20k in, 2k out");
+    expect(shown).toContain("13.5k · 12k in, 1.5k out");
+    expect(shown).toContain("11k per call");
+    // The window is spent by the largest prompt, not the running total.
+    expect(shown).toContain("12k peak prompt of 100k (12%)");
+    ui.stop();
+  });
+
+  test("/tokens says so plainly before any model call", () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.feedKeys("/tokens\r");
+    expect(text()).toContain("No model calls yet");
+    ui.stop();
+  });
+
   test("/plan toggles the mode and shows it in the footer", () => {
     const { ui, text } = harness();
     ui.start();
