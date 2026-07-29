@@ -184,6 +184,11 @@ export class TerminalUI implements ApprovalHandler {
   /** Per-tool cost across the whole session; the registry is per-turn. */
   readonly #toolUsage = new Map<ToolName, ToolUsage>();
   #queued: string[] = [];
+  /**
+   * A steering message promoted to the next task by `readTask`. It was already
+   * echoed when it was typed, so `beginRun` must not print it a second time.
+   */
+  #echoedTask: string | null = null;
   #select: PendingSelect | null = null;
   /** Set only while the full-screen pager owns the alternate screen. */
   #pager: PagerState | null = null;
@@ -316,6 +321,14 @@ export class TerminalUI implements ApprovalHandler {
       this.#pendingTask = null;
       return task;
     }
+    // Steering typed after the loop's last drain has nowhere left to go this
+    // turn, so it becomes the next task rather than being silently discarded.
+    // Anything behind it stays queued and steers that run, preserving order.
+    const stranded = this.#queued.shift();
+    if (stranded !== undefined) {
+      this.#echoedTask = stranded;
+      return stranded;
+    }
     this.#renderLive();
     return await new Promise<string | null>((resolve) => {
       this.#taskResolve = resolve;
@@ -336,9 +349,16 @@ export class TerminalUI implements ApprovalHandler {
     this.#interrupting = false;
     this.#wasInterrupted = false;
     this.#reasoning = "";
-    this.#queued = [];
+    // The queue is deliberately NOT cleared here. It used to be, which threw
+    // away anything typed after the agent loop's final drain — echoed to the
+    // transcript as if accepted, then wiped by the next turn. Whatever is left
+    // is steering the first iteration of this run will collect.
     this.#abort = new AbortController();
-    this.#write(renderTask(display ?? task, this.#width()));
+    const echoed = this.#echoedTask;
+    this.#echoedTask = null;
+    if (echoed === null || echoed !== task) {
+      this.#write(renderTask(display ?? task, this.#width()));
+    }
     this.#renderLive();
     return this.#abort.signal;
   }

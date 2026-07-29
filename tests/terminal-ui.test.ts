@@ -179,6 +179,61 @@ describe("TerminalUI", () => {
     ui.stop();
   });
 
+  test("steering typed after the loop's last drain becomes the next task", async () => {
+    const { ui } = harness();
+    ui.start();
+    ui.beginRun("first task");
+    // Nobody drains after this: the model has already decided to complete.
+    ui.feedKeys("also update the docs\r");
+    ui.endRun({ state: "complete", summary: "done", artifacts: [] } as never);
+
+    // It used to be echoed, then wiped by the next beginRun without ever
+    // reaching the model. readTask must not block waiting for fresh input.
+    expect(await ui.readTask()).toBe("also update the docs");
+    ui.stop();
+  });
+
+  test("a promoted steering message is not echoed to the transcript twice", async () => {
+    const { ui, chunks } = harness();
+    ui.start();
+    ui.beginRun("first task");
+    ui.feedKeys("also update the docs\r");
+    ui.endRun({ state: "complete", summary: "done", artifacts: [] } as never);
+    const task = (await ui.readTask()) as string;
+
+    const mark = chunks.length;
+    ui.beginRun(task);
+    const emitted = stripAnsi(chunks.slice(mark).join(""));
+    expect(emitted).not.toContain("also update the docs");
+    ui.stop();
+  });
+
+  test("an ordinary task is still echoed by beginRun", () => {
+    const { ui, chunks } = harness();
+    ui.start();
+    const mark = chunks.length;
+    ui.beginRun("an ordinary task");
+    expect(stripAnsi(chunks.slice(mark).join(""))).toContain("an ordinary task");
+    ui.stop();
+  });
+
+  test("messages behind the promoted one stay queued, in order", async () => {
+    const { ui } = harness();
+    ui.start();
+    ui.beginRun("first task");
+    ui.feedKeys("one\r");
+    ui.feedKeys("two\r");
+    ui.feedKeys("three\r");
+    ui.endRun({ state: "complete", summary: "done", artifacts: [] } as never);
+
+    // The first becomes the task; the rest steer that run rather than being
+    // dropped, which is why beginRun no longer clears the queue.
+    expect(await ui.readTask()).toBe("one");
+    ui.beginRun("one");
+    expect(ui.drainInput()).toEqual(["two", "three"]);
+    ui.stop();
+  });
+
   test("escape interrupts the run and the agent sees an aborted signal", () => {
     const { ui, text } = harness();
     ui.start();
