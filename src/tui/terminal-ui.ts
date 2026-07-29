@@ -1,0 +1,1085 @@
+import { parseGoalArguments, type Goal } from "../agent/goal.ts";
+import type {
+  ApprovalHandler,
+  ApprovalRequest,
+  EventSink,
+  ModelUsage,
+  ProviderObserver,
+  RunMode,
+  RunResult,
+  RuntimeEvent,
+  ToolCall,
+  ToolName,
+} from "../core/types.ts";
+import { listWorkspaceFiles } from "../repository/inspect.ts";
+import { renderHeader, renderRule } from "./chrome.ts";
+import { control, cursorToColumn, cursorUp } from "./theme.ts";
+import {
+  applyCompletion,
+  completionContext,
+  rankCandidates,
+  SLASH_COMMANDS,
+  type CompletionItem,
+} from "./completion.ts";
+import {
+  KeyDecoder,
+  LineEditor,
+  renderFooter,
+  type CompletionView,
+  type FooterView,
+  type Key,
+} from "./live.ts";
+import {
+  digitSelection,
+  moveSelection,
+  type SelectOption,
+  type SelectView,
+} from "./select.ts";
+import {
+  describeCall,
+  goalBadge,
+  renderAssistant,
+  renderDiffSummary,
+  renderError,
+  renderFileList,
+  renderGoalCard,
+  renderHelp,
+  renderInlineDiff,
+  renderInterrupted,
+  renderNarration,
+  renderNote,
+  renderPatch,
+  renderTask,
+  renderToolChange,
+  renderToolEnd,
+} from "./transcript.ts";
+
+/** Sun's own take on Codex's rotating composer examples. */
+const PLACEHOLDERS = [
+  "Ask anything",
+  "Explain this codebase",
+  "Fix the failing test in @path",
+  "Set a long task with /goal",
+  "Review my working changes with /diff",
+] as const;
+
+const TIPS = [
+  "Press esc while Sun works to interrupt at the next safe boundary.",
+  "Use /goal to give Sun an objective that outlives a single answer.",
+  "Type @ to complete a workspace path, / for a command.",
+] as const;
+
+/** Read a model list and switch the session onto one. */
+export interface ModelController {
+  current(): string;
+  list(): Promise<string[]>;
+  select(model: string): Promise<void>;
+}
+
+/** The persisted goal, owned by the session loop. */
+export interface GoalController {
+  current(): Goal | null;
+  set(objective: string, tokenBudget: number | null): Promise<Goal>;
+  clear(): Promise<void>;
+  pause(): Promise<Goal | null>;
+  resume(): Promise<Goal | null>;
+}
+
+export interface TerminalUIOptions {
+  version: string;
+  mode: RunMode;
+  model: string;
+  repository: string;
+  /** Injectable sink for tests; defaults to the real terminal. */
+  output?: { write(chunk: string): void };
+  /** Injectable workspace listing for `@` completion; defaults to a real walk. */
+  listFiles?: () => Promise<string[]>;
+  models?: ModelController;
+  goal?: GoalController;
+}
+
+interface FileActivity {
+  path: string;
+  action: string;
+  status: "running" | "ok" | "failed";
+}
+
+interface PendingSelect {
+  view: SelectView;
+  resolve: (index: number | null) => void;
+}
+
+const CTRL_C_EXIT_WINDOW_MS = 2_000;
+/** Reasoning text kept in memory for the live window. */
+const REASONING_BUFFER = 2_000;
+
+/** Keys that change the buffer, and so revive a dismissed completion menu. */
+const EDITING_KEYS = new Set<Key["name"]>([
+  "char",
+  "paste",
+  "backspace",
+  "delete",
+  "kill-word",
+]);
+
+/**
+ * Sun's interactive terminal. The transcript is written to normal scrollback so
+ * a finished session stays readable, while a small live region at the bottom
+ * carries streamed reasoning, the working row, the composer, and the status.
+ */
+export class TerminalUI implements ApprovalHandler {
+  readonly #options: TerminalUIOptions;
+  readonly #out: { write(chunk: string): void };
+  readonly #editor = new LineEditor();
+  readonly #decoder = new KeyDecoder();
+  readonly #files = new Map<string, FileActivity>();
+
+  #active = false;
+  #busy = false;
+  #exitRequested = false;
+  #diffPatch = "";
+  #changedFiles: string[] = [];
+  #runStartedAt = Date.now();
+  #toolStartedAt = 0;
+  #pendingCall: ToolCall | null = null;
+  #suppressNextInlineDiff = false;
+  #totalTokens = 0;
+  #queued: string[] = [];
+  #select: PendingSelect | null = null;
+  /** "ask" stops at every command; "auto" runs them inside the sandbox. */
+  #approvalMode: "ask" | "auto" = "ask";
+  readonly #alwaysApproved = new Set<string>();
+  #taskResolve: ((task: string | null) => void) | null = null;
+  #pendingTask: string | null = null;
+  #abort: AbortController | null = null;
+  #interrupting = false;
+  #wasInterrupted = false;
+  #reasoning = "";
+  #notice = "";
+  #noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  #lastCtrlC = 0;
+  #placeholder = 0;
+  #timer: ReturnType<typeof setInterval> | null = null;
+  #keyFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  #liveRows = 0;
+  #cursorRow = 0;
+  #lastFrame = "";
+  #completion: CompletionView | null = null;
+  #completionDismissed = false;
+  #fileCandidates: CompletionItem[] | null = null;
+  #filesLoading = false;
+
+  readonly #onData = (data: Buffer | string) => this.#feedTerminalKeys(data);
+  readonly #onResize = () => {
+    this.#lastFrame = "";
+    this.#renderLive();
+  };
+  readonly #onExit = () => this.#restore();
+
+  constructor(options: TerminalUIOptions) {
+    this.#options = options;
+    this.#out = options.output ?? process.stdout;
+  }
+
+  get exitRequested(): boolean {
+    return this.#exitRequested;
+  }
+
+  /** Cumulative session tokens, so the session loop can bill a goal turn. */
+  get totalTokens(): number {
+    return this.#totalTokens;
+  }
+
+  /** Runtime events from the agent loop. */
+  readonly handle: EventSink = (event) => {
+    this.#consume(event);
+  };
+
+  /** Model telemetry, wired into the provider. */
+  readonly observer: ProviderObserver = {
+    onPhaseStart: (phase) => this.#consume({ type: "model_start", phase }),
+    onThinking: (phase, delta) =>
+      this.#consume({ type: "thinking", phase, delta }),
+    onPhaseEnd: (phase, info) =>
+      this.#consume({ type: "model_end", phase, ...info }),
+  };
+
+  start(): void {
+    if (this.#active) return;
+    this.#active = true;
+    this.#write(
+      renderHeader(
+        {
+          name: "Sun",
+          version: this.#options.version,
+          model: this.#currentModel(),
+          repository: this.#options.repository,
+          tip: TIPS[Math.floor(Math.random() * TIPS.length)] ?? TIPS[0],
+        },
+        this.#width(),
+      ),
+    );
+    process.once("exit", this.#onExit);
+    process.stdout.on("resize", this.#onResize);
+    this.#enableInput();
+    // The working row shows elapsed seconds, so it has to repaint on a timer
+    // even when no event has arrived.
+    this.#timer = setInterval(() => {
+      if (this.#busy) this.#renderLive();
+    }, 500);
+    this.#timer.unref();
+    this.#renderLive();
+  }
+
+  stop(): void {
+    if (!this.#active) return;
+    this.#active = false;
+    if (this.#timer) clearInterval(this.#timer);
+    this.#timer = null;
+    if (this.#keyFlushTimer) clearTimeout(this.#keyFlushTimer);
+    this.#keyFlushTimer = null;
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = null;
+    process.stdout.off("resize", this.#onResize);
+    process.off("exit", this.#onExit);
+    this.#disableInput();
+    this.#clearLive();
+    this.#restore();
+    this.#out.write("\n");
+  }
+
+  /** Resolves with the next task, or null when the user asked to exit. */
+  async readTask(): Promise<string | null> {
+    if (this.#exitRequested) return null;
+    this.#busy = false;
+    this.#placeholder = (this.#placeholder + 1) % PLACEHOLDERS.length;
+    // A task queued between runs is never dropped on the floor. The test is
+    // against null, not truthiness: a goal hand-off queues the empty string,
+    // which means "pursue the active goal".
+    if (this.#pendingTask !== null) {
+      const task = this.#pendingTask;
+      this.#pendingTask = null;
+      return task;
+    }
+    this.#renderLive();
+    return await new Promise<string | null>((resolve) => {
+      this.#taskResolve = resolve;
+    });
+  }
+
+  /**
+   * `display` is what the transcript shows. A goal continuation sends the
+   * model a long steering prompt but should read as one short line here.
+   */
+  beginRun(task: string, display?: string): AbortSignal {
+    this.#busy = true;
+    this.#files.clear();
+    this.#diffPatch = "";
+    this.#changedFiles = [];
+    this.#suppressNextInlineDiff = false;
+    this.#runStartedAt = Date.now();
+    this.#interrupting = false;
+    this.#wasInterrupted = false;
+    this.#reasoning = "";
+    this.#queued = [];
+    this.#abort = new AbortController();
+    this.#write(renderTask(display ?? task, this.#width()));
+    this.#renderLive();
+    return this.#abort.signal;
+  }
+
+  endRun(result: RunResult | null): void {
+    const interrupted = this.#wasInterrupted;
+    const width = this.#width();
+    this.#busy = false;
+    this.#abort = null;
+    this.#interrupting = false;
+    this.#pendingCall = null;
+    this.#reasoning = "";
+    this.#notice = "";
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = null;
+    // A run can create or delete files, so the completion cache is rebuilt.
+    this.#fileCandidates = null;
+    if (result) {
+      if (interrupted) {
+        this.#write(
+          renderInterrupted("partial response kept in context", width),
+        );
+      } else if (result.state === "blocked") {
+        this.#write(renderError(result.summary, width));
+      } else {
+        this.#write(renderAssistant(result.summary, width));
+      }
+      this.#write([renderRule(width), ""]);
+    }
+    this.#renderLive();
+  }
+
+  note(message: string): void {
+    this.#write(renderNote(message, this.#width()));
+  }
+
+  error(message: string): void {
+    this.#write(renderError(message, this.#width()));
+  }
+
+  /** Print the goal card, used by the session loop when a goal settles. */
+  showGoal(goal: Goal): void {
+    this.#write(renderGoalCard(goal, this.#width()));
+  }
+
+  drainInput(): string[] {
+    return this.#queued.splice(0);
+  }
+
+  /** The single entry point for terminal input; also used by tests. */
+  feedKeys(raw: string): void {
+    for (const key of [...this.#decoder.feed(raw), ...this.#decoder.flush()]) {
+      this.#handleKey(key);
+    }
+  }
+
+  #feedTerminalKeys(raw: Buffer | string): void {
+    if (this.#keyFlushTimer) clearTimeout(this.#keyFlushTimer);
+    this.#keyFlushTimer = null;
+    for (const key of this.#decoder.feed(raw)) this.#handleKey(key);
+    this.#keyFlushTimer = setTimeout(() => {
+      this.#keyFlushTimer = null;
+      for (const key of this.#decoder.flush()) this.#handleKey(key);
+    }, 20);
+    this.#keyFlushTimer.unref();
+  }
+
+  async confirm(request: ApprovalRequest): Promise<boolean> {
+    if (!this.#active) return false;
+    const scope = approvalScope(request);
+    if (this.#approvalMode === "auto" || this.#alwaysApproved.has(scope)) {
+      this.#toolStartedAt = Date.now();
+      return true;
+    }
+    const command = request.command ?? request.action.replace(/^[^:]+:\s*/, "");
+    const choice = await this.#choose({
+      title: "Allow Sun to run this command?",
+      subtitle: command,
+      options: [
+        { label: "Yes, run it" },
+        { label: `Yes, and stop asking about ${scope} this session` },
+        { label: "No, and let me steer instead" },
+      ],
+      hint: "Press enter to confirm, esc to skip the command",
+    });
+    if (choice === 1) this.#alwaysApproved.add(scope);
+    if (choice === 2) {
+      this.#editor.set(`Use this instead of \`${command}\`: `);
+    }
+    // Approval wait is human time, not command runtime.
+    this.#toolStartedAt = Date.now();
+    return choice === 0 || choice === 1;
+  }
+
+  // ---------------------------------------------------------------- events
+
+  #consume(event: RuntimeEvent): void {
+    const width = this.#width();
+    switch (event.type) {
+      case "model_start":
+        this.#reasoning = "";
+        break;
+      case "thinking":
+        // Codex shows the model thinking as it happens. Only the tail is kept:
+        // this is a window onto the stream, and the narration bullet written
+        // at tool_start is what actually survives into scrollback.
+        this.#reasoning = `${this.#reasoning}${event.delta}`.slice(
+          -REASONING_BUFFER,
+        );
+        break;
+      case "model_end":
+        this.#recordUsage(event.usage);
+        break;
+      case "tool_start":
+        this.#pendingCall = event.call;
+        this.#toolStartedAt = Date.now();
+        this.#reasoning = "";
+        this.#trackFile(event.call, "running");
+        this.#write(renderNarration(event.call.rationale, width));
+        break;
+      case "tool_end": {
+        // One blank row closes the whole block, so an edit reads as a headline
+        // with its diff attached rather than two separate events.
+        this.#write([
+          ...renderToolEnd(
+            event.call,
+            event.result,
+            width,
+            this.#toolStartedAt ? Date.now() - this.#toolStartedAt : undefined,
+          ),
+          ...renderToolChange(event.call, event.result, width),
+          "",
+        ]);
+        this.#suppressNextInlineDiff =
+          event.result.ok &&
+          (event.call.tool === "edit" || event.call.tool === "write");
+        this.#trackFile(event.call, event.result.ok ? "ok" : "failed");
+        this.#pendingCall = null;
+        break;
+      }
+      case "diff":
+        if (
+          !this.#suppressNextInlineDiff &&
+          event.patch.trim() &&
+          event.patch !== this.#diffPatch
+        ) {
+          this.#write([...renderInlineDiff(event.patch, width), ""]);
+        }
+        this.#suppressNextInlineDiff = false;
+        this.#diffPatch = event.patch;
+        this.#changedFiles = event.files;
+        break;
+      case "approval":
+        break;
+      case "interrupted":
+        this.#wasInterrupted = true;
+        break;
+    }
+    this.#renderLive();
+  }
+
+  #recordUsage(usage: ModelUsage | null): void {
+    if (!usage) return;
+    this.#totalTokens += usage.totalTokens;
+  }
+
+  #trackFile(call: ToolCall, status: FileActivity["status"]): void {
+    const path = filePath(call.tool, call.input);
+    if (!path) return;
+    this.#files.set(path, { path, action: call.tool, status });
+  }
+
+  // ------------------------------------------------------------------ keys
+
+  #handleKey(key: Key): void {
+    if (this.#select) {
+      this.#handleSelectKey(key);
+      return;
+    }
+    if (this.#completion && this.#handleCompletionKey(key)) {
+      this.#renderLive();
+      return;
+    }
+    // Any edit re-opens a menu the user dismissed with escape.
+    if (EDITING_KEYS.has(key.name)) this.#completionDismissed = false;
+    switch (key.name) {
+      case "char":
+      case "paste":
+        this.#editor.insert(key.text);
+        break;
+      case "enter":
+        this.#submit();
+        break;
+      case "newline":
+        this.#editor.insert("\n");
+        break;
+      case "backspace":
+        this.#editor.backspace();
+        break;
+      case "delete":
+        this.#editor.delete();
+        break;
+      case "left":
+        this.#editor.move(-1);
+        break;
+      case "right":
+        this.#editor.move(1);
+        break;
+      case "up":
+        this.#editor.previous();
+        break;
+      case "down":
+        this.#editor.next();
+        break;
+      case "home":
+        this.#editor.home();
+        break;
+      case "end":
+        this.#editor.end();
+        break;
+      case "kill-line":
+        this.#editor.killLine();
+        break;
+      case "kill-word":
+        this.#editor.killWord();
+        break;
+      case "clear-screen":
+        this.#clearScreen();
+        break;
+      case "escape":
+        this.#escape();
+        break;
+      case "interrupt":
+        this.#interrupt();
+        break;
+      case "eof":
+        if (!this.#editor.value) this.#requestExit();
+        break;
+      case "tab":
+      case "unknown":
+        break;
+    }
+    this.#refreshCompletion();
+    this.#renderLive();
+  }
+
+  // ---------------------------------------------------------------- select
+
+  /** Open a modal choice and resolve with the chosen index, or null on esc. */
+  async #choose(view: Omit<SelectView, "selected">): Promise<number | null> {
+    if (!this.#active || view.options.length === 0) return null;
+    const choice = await new Promise<number | null>((resolve) => {
+      this.#select = { view: { ...view, selected: 0 }, resolve };
+      this.#renderLive();
+    });
+    this.#select = null;
+    this.#renderLive();
+    return choice;
+  }
+
+  #handleSelectKey(key: Key): void {
+    const pending = this.#select;
+    if (!pending) return;
+    const count = pending.view.options.length;
+    switch (key.name) {
+      case "up":
+        pending.view = {
+          ...pending.view,
+          selected: moveSelection(pending.view.selected, count, -1),
+        };
+        break;
+      case "down":
+        pending.view = {
+          ...pending.view,
+          selected: moveSelection(pending.view.selected, count, 1),
+        };
+        break;
+      case "enter":
+        pending.resolve(pending.view.selected);
+        return;
+      case "escape":
+        pending.resolve(null);
+        return;
+      case "interrupt":
+        pending.resolve(null);
+        this.#interrupt();
+        return;
+      case "char": {
+        const index = digitSelection(key.text, count);
+        if (index !== null) {
+          pending.resolve(index);
+          return;
+        }
+        break;
+      }
+      default:
+        break;
+    }
+    this.#renderLive();
+  }
+
+  // ------------------------------------------------------------ completion
+
+  /** Returns true when the open menu consumed the key. */
+  #handleCompletionKey(key: Key): boolean {
+    const menu = this.#completion;
+    if (!menu) return false;
+    const count = menu.items.length;
+    switch (key.name) {
+      case "up":
+        this.#completion = {
+          ...menu,
+          selected: moveSelection(menu.selected, count, -1),
+        };
+        return true;
+      case "down":
+        this.#completion = {
+          ...menu,
+          selected: moveSelection(menu.selected, count, 1),
+        };
+        return true;
+      case "tab":
+        this.#acceptCompletion();
+        return true;
+      case "enter": {
+        // A fully typed token means the user is done choosing: let the key
+        // through so one enter submits instead of two.
+        const context = completionContext(
+          this.#editor.value,
+          this.#editor.cursor,
+        );
+        if (context && menu.items[menu.selected]?.value === context.query) {
+          this.#completion = null;
+          this.#completionDismissed = true;
+          return false;
+        }
+        this.#acceptCompletion();
+        return true;
+      }
+      case "escape":
+        this.#completion = null;
+        this.#completionDismissed = true;
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  #acceptCompletion(): void {
+    const menu = this.#completion;
+    const context = completionContext(this.#editor.value, this.#editor.cursor);
+    const item = menu?.items[menu.selected];
+    if (!menu || !context || !item) return;
+    const next = applyCompletion(
+      this.#editor.value,
+      this.#editor.cursor,
+      context,
+      item,
+    );
+    this.#editor.replace(next.value, next.cursor);
+    // Accepting settles the token: the menu stays shut until the next edit,
+    // rather than reopening on the exact match that was just chosen.
+    this.#completion = null;
+    this.#completionDismissed = true;
+  }
+
+  #refreshCompletion(): void {
+    const context = this.#completionDismissed
+      ? null
+      : completionContext(this.#editor.value, this.#editor.cursor);
+    if (!context) {
+      this.#completion = null;
+      return;
+    }
+    if (context.trigger === "/") {
+      const items = rankCandidates(SLASH_COMMANDS, context.query);
+      this.#completion = items.length
+        ? { trigger: "/", items, selected: 0 }
+        : null;
+      return;
+    }
+    this.#ensureFileCandidates();
+    const items = rankCandidates(this.#fileCandidates ?? [], context.query);
+    this.#completion = items.length
+      ? { trigger: "@", items, selected: 0 }
+      : null;
+  }
+
+  /**
+   * The workspace walk is deferred until the first `@` and then cached for the
+   * rest of the run, so an idle session never pays for it.
+   */
+  #ensureFileCandidates(): void {
+    if (this.#fileCandidates || this.#filesLoading) return;
+    this.#filesLoading = true;
+    const list =
+      this.#options.listFiles ??
+      (() => listWorkspaceFiles(this.#options.repository));
+    void list()
+      .then((paths) => {
+        this.#fileCandidates = paths.map((path) => ({ value: path, detail: "" }));
+      })
+      .catch(() => {
+        this.#fileCandidates = [];
+      })
+      .finally(() => {
+        this.#filesLoading = false;
+        this.#refreshCompletion();
+        this.#renderLive();
+      });
+  }
+
+  #submit(): void {
+    const value = this.#editor.submit();
+    this.#completion = null;
+    this.#completionDismissed = false;
+    if (!value) return;
+    if (value.startsWith("/")) {
+      void this.#runCommand(value);
+      return;
+    }
+    if (this.#busy) {
+      this.#queued.push(value);
+      this.#write(renderTask(value, this.#width()));
+      return;
+    }
+    const resolve = this.#taskResolve;
+    this.#taskResolve = null;
+    if (resolve) {
+      resolve(value);
+      return;
+    }
+    this.#pendingTask = value;
+  }
+
+  #escape(): void {
+    if (this.#editor.value) {
+      this.#editor.killLine();
+      return;
+    }
+    if (this.#busy) this.#interruptRun();
+  }
+
+  #interrupt(): void {
+    if (this.#editor.value) {
+      this.#editor.killLine();
+      return;
+    }
+    if (this.#busy) {
+      this.#interruptRun();
+      return;
+    }
+    const now = Date.now();
+    if (now - this.#lastCtrlC < CTRL_C_EXIT_WINDOW_MS) {
+      this.#requestExit();
+      return;
+    }
+    this.#lastCtrlC = now;
+    this.#setNotice("press ctrl+c again to exit");
+  }
+
+  #interruptRun(): void {
+    if (this.#interrupting) return;
+    this.#interrupting = true;
+    this.#setNotice("interrupting at the next safe boundary…");
+    this.#abort?.abort();
+  }
+
+  #requestExit(): void {
+    this.#exitRequested = true;
+    this.#abort?.abort();
+    this.#select?.resolve(null);
+    const resolve = this.#taskResolve;
+    this.#taskResolve = null;
+    resolve?.(null);
+  }
+
+  #setNotice(message: string): void {
+    this.#notice = message;
+    if (this.#noticeTimer) clearTimeout(this.#noticeTimer);
+    this.#noticeTimer = setTimeout(() => {
+      this.#notice = "";
+      this.#renderLive();
+    }, 2_500);
+    this.#noticeTimer.unref?.();
+  }
+
+  // -------------------------------------------------------------- commands
+
+  async #runCommand(raw: string): Promise<void> {
+    const [command = ""] = raw.slice(1).split(/\s+/);
+    const argument = raw.slice(1 + command.length).trim();
+    const width = this.#width();
+    switch (command.toLowerCase()) {
+      case "help":
+      case "?":
+        this.#write(renderHelp(width));
+        break;
+      case "goal":
+        await this.#goalCommand(argument);
+        break;
+      case "model":
+        await this.#modelCommand();
+        break;
+      case "approvals":
+        await this.#approvalsCommand();
+        break;
+      case "diff":
+        this.#write(
+          this.#changedFiles.length
+            ? [
+                ...renderDiffSummary(this.#changedFiles, this.#diffPatch, width),
+                ...renderPatch(this.#diffPatch, width),
+              ]
+            : renderNote("The working tree is unchanged.", width),
+        );
+        break;
+      case "files":
+        this.#write(renderFileList([...this.#files.values()], width));
+        break;
+      case "clear":
+        this.#clearScreen();
+        break;
+      case "quit":
+      case "exit":
+        this.#requestExit();
+        break;
+      default:
+        this.#write(
+          renderNote(`Unknown command /${command}. Try /help.`, width),
+        );
+    }
+  }
+
+  async #goalCommand(argument: string): Promise<void> {
+    const goals = this.#options.goal;
+    const width = this.#width();
+    if (!goals) {
+      this.#write(renderNote("Goals need an interactive session.", width));
+      return;
+    }
+    // A sub-command has to be the whole argument. "/goal clear the caches" is
+    // an objective about caches, not a request to forget the goal.
+    const action = argument.toLowerCase();
+    if (!argument) {
+      const current = goals.current();
+      this.#write(
+        current
+          ? renderGoalCard(current, width)
+          : renderNote(
+              "No goal is set. Use /goal <objective> to start one.",
+              width,
+            ),
+      );
+      return;
+    }
+    if (action === "clear" || action === "stop") {
+      await goals.clear();
+      this.#write(renderNote("Goal cleared.", width));
+      return;
+    }
+    if (action === "pause") {
+      const paused = await goals.pause();
+      this.#write(
+        paused
+          ? renderGoalCard(paused, width)
+          : renderNote("No goal is set.", width),
+      );
+      return;
+    }
+    if (action === "resume") {
+      const resumed = await goals.resume();
+      if (!resumed) {
+        this.#write(renderNote("No goal is set.", width));
+        return;
+      }
+      this.#write(renderGoalCard(resumed, width));
+      // Resuming has to actually restart the loop, not just repaint the card.
+      this.#deliverTask("");
+      return;
+    }
+    const { objective, tokenBudget } = parseGoalArguments(argument);
+    if (!objective) {
+      this.#write(renderNote("A goal needs an objective.", width));
+      return;
+    }
+    const goal = await goals.set(objective, tokenBudget);
+    this.#write(renderGoalCard(goal, width));
+    this.#deliverTask("");
+  }
+
+  /**
+   * Hand the session loop an empty task, which it reads as "a goal is active,
+   * start pursuing it".
+   */
+  #deliverTask(task: string): void {
+    const resolve = this.#taskResolve;
+    this.#taskResolve = null;
+    if (resolve) resolve(task);
+    else this.#pendingTask = task;
+  }
+
+  async #modelCommand(): Promise<void> {
+    const models = this.#options.models;
+    const width = this.#width();
+    if (!models) {
+      this.#write(renderNote("Model switching needs an interactive session.", width));
+      return;
+    }
+    this.#setNotice("loading models…");
+    const available = await models.list().catch(() => [] as string[]);
+    this.#notice = "";
+    if (available.length === 0) {
+      this.#write(
+        renderNote("The endpoint reported no models. Try sun doctor.", width),
+      );
+      return;
+    }
+    const current = models.current();
+    const options: SelectOption[] = available.map((model) => ({
+      label: model,
+      ...(model === current ? { current: true } : {}),
+    }));
+    const choice = await this.#choose({
+      title: "Select model",
+      subtitle: "Sun keeps the conversation and switches the model for the next turn.",
+      options,
+    });
+    const picked = choice === null ? null : available[choice];
+    if (!picked || picked === current) return;
+    await models.select(picked);
+    this.#write(renderNote(`Model set to ${picked}.`, width));
+  }
+
+  async #approvalsCommand(): Promise<void> {
+    const choice = await this.#choose({
+      title: "Update command approvals",
+      subtitle:
+        "Every command runs inside the Bubblewrap sandbox either way; this only changes whether Sun stops to ask first.",
+      options: [
+        {
+          label: "Ask every time",
+          description:
+            "Sun pauses at each command and shows it before anything runs.",
+          ...(this.#approvalMode === "ask" ? { current: true } : {}),
+        },
+        {
+          label: "Run without asking",
+          description:
+            "Commands go straight to the sandbox. Sun still cannot reach the network or leave the workspace.",
+          ...(this.#approvalMode === "auto" ? { current: true } : {}),
+        },
+      ],
+    });
+    if (choice === null) return;
+    this.#approvalMode = choice === 1 ? "auto" : "ask";
+    this.#write(
+      renderNote(
+        this.#approvalMode === "auto"
+          ? "Sun will run sandboxed commands without asking."
+          : "Sun will ask before every command.",
+        this.#width(),
+      ),
+    );
+  }
+
+  #currentModel(): string {
+    return this.#options.models?.current() ?? this.#options.model;
+  }
+
+  // -------------------------------------------------------------- terminal
+
+  #clearScreen(): void {
+    this.#out.write(control.clearScreen);
+    this.#liveRows = 0;
+    this.#cursorRow = 0;
+    this.#lastFrame = "";
+  }
+
+  #width(): number {
+    const columns = process.stdout.columns ?? 80;
+    return Math.max(12, columns - 1);
+  }
+
+  #enableInput(): void {
+    if (!process.stdin.isTTY) return;
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", this.#onData);
+    this.#out.write("\x1b[?2004h");
+  }
+
+  #disableInput(): void {
+    if (!process.stdin.isTTY) return;
+    this.#out.write("\x1b[?2004l");
+    process.stdin.off("data", this.#onData);
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+  }
+
+  #restore(): void {
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    this.#out.write(`\x1b[?2004l${control.showCursor}`);
+  }
+
+  #write(lines: string[]): void {
+    if (!this.#active || lines.length === 0) return;
+    this.#clearLive();
+    this.#out.write(`${lines.join("\n")}\n`);
+    this.#renderLive(true);
+  }
+
+  /** The sequence that removes the live region, so a caller can batch it. */
+  #eraseLive(): string {
+    if (this.#liveRows === 0) return "";
+    const sequence =
+      control.lineStart + cursorUp(this.#cursorRow) + control.eraseDown;
+    this.#liveRows = 0;
+    this.#cursorRow = 0;
+    return sequence;
+  }
+
+  #clearLive(): void {
+    const sequence = this.#eraseLive();
+    if (sequence) this.#out.write(sequence);
+  }
+
+  #renderLive(force = false): void {
+    if (!this.#active) return;
+    const frame = renderFooter(this.#view(), this.#width());
+    const maxRows = Math.max(4, (process.stdout.rows ?? 24) - 1);
+    const lines = frame.lines.slice(-maxRows);
+    const cursorRow = frame.cursorRow - (frame.lines.length - lines.length);
+    const signature = `${lines.join("\n")}|${cursorRow}|${frame.cursorColumn}`;
+    if (!force && signature === this.#lastFrame) return;
+    this.#lastFrame = signature;
+
+    const up = Math.max(0, lines.length - 1 - cursorRow);
+    this.#out.write(
+      control.syncStart +
+        control.hideCursor +
+        this.#eraseLive() +
+        lines.join("\n") +
+        control.lineStart +
+        cursorUp(up) +
+        cursorToColumn(frame.cursorColumn) +
+        (this.#select ? "" : control.showCursor) +
+        control.syncEnd,
+    );
+    this.#liveRows = lines.length;
+    this.#cursorRow = Math.max(0, cursorRow);
+  }
+
+  #view(): FooterView {
+    const goal = this.#options.goal?.current() ?? null;
+    return {
+      busy: this.#busy,
+      activity: "",
+      elapsedMs: this.#busy
+        ? this.#pendingCall
+          ? Date.now() - this.#toolStartedAt
+          : Date.now() - this.#runStartedAt
+        : 0,
+      totalTokens: this.#totalTokens,
+      model: this.#currentModel(),
+      mode: this.#options.mode,
+      repository: this.#options.repository,
+      input: this.#editor.value,
+      cursor: this.#editor.cursor,
+      activeTool: this.#pendingCall
+        ? {
+            name: this.#pendingCall.tool,
+            target: describeCall(this.#pendingCall),
+          }
+        : null,
+      notice: this.#notice,
+      completion: this.#completion,
+      reasoning: this.#reasoning,
+      select: this.#select?.view ?? null,
+      placeholder: PLACEHOLDERS[this.#placeholder] ?? PLACEHOLDERS[0],
+      ...(goal ? { goal: goalBadge(goal) } : {}),
+    };
+  }
+}
+
+function filePath(
+  tool: ToolName,
+  input: Record<string, unknown>,
+): string | null {
+  if (tool === "read" || tool === "edit" || tool === "write") {
+    return typeof input.path === "string" ? input.path : null;
+  }
+  return null;
+}
+
+function approvalScope(request: ApprovalRequest): string {
+  return request.action.split(":")[0]?.trim().toLowerCase() || "action";
+}

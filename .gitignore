@@ -1,0 +1,17 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+coverage/
+dist/
+
+# Runtime state belongs to the repository being operated on, not Sun itself.
+.agent/state.db
+.agent/state.db-shm
+.agent/state.db-wal
+.agent/sessions/
+.agent/memory/pending-lessons.jsonl
+.agent/memory/profile.yaml
+.agent/memory/projects/
+.agent/memory/procedures/

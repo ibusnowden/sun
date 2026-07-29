@@ -1,0 +1,29 @@
+{
+  "name": "@ibusnowden/sun",
+  "version": "0.1.0",
+  "description": "A simple TypeScript coding agent with a responsive terminal UI",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "sun": "./src/cli.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "bun run typecheck && bun test"
+  },
+  "dependencies": {
+    "openai": "6.49.0",
+    "smol-toml": "1.7.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  },
+  "packageManager": "bun@1.3.13"
+}

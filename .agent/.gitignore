@@ -1,0 +1,8 @@
+state.db
+state.db-shm
+state.db-wal
+sessions/
+memory/pending-lessons.jsonl
+memory/profile.yaml
+memory/projects/
+memory/procedures/

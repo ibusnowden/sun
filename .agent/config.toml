@@ -1,0 +1,12 @@
+# Sun configuration
+provider = "openai-compatible"
+model = "glm-5.2"
+base_url = "http://127.0.0.1:4000/v1"
+api_key_env = "SUN_API_KEY"
+model_timeout_ms = 600000
+model_max_tokens = 16384
+model_context_tokens = 262144
+max_tool_calls = 50
+command_timeout_ms = 120000
+max_output_bytes = 100000
+stream_reasoning = true
