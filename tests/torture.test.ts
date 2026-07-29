@@ -32,6 +32,8 @@ import {
   renderToolChange,
   renderToolEnd,
 } from "../src/tui/transcript.ts";
+import { renderActivity } from "../src/tui/heatmap.ts";
+import { emptyHistory, recordUsage, recordTask } from "../src/agent/usage.ts";
 import { visibleWidth } from "../src/tui/theme.ts";
 import { git, temporaryDirectory } from "./helpers.ts";
 
@@ -314,6 +316,9 @@ describe("bounded torture suite", () => {
           },
           width,
         ),
+        ...(["daily", "weekly", "cumulative"] as const).map((mode) =>
+          renderActivity(torturedHistory(), mode, width),
+        ),
         renderFileList(
           [{ path: "very/long/file.ts", action: "modified", status: "done" }],
           width,
@@ -418,6 +423,27 @@ function footer(overrides: Partial<FooterView> = {}): FooterView {
     notice: "",
     ...overrides,
   };
+}
+
+/** A year of dense activity, so the grid is at its widest. */
+function torturedHistory() {
+  let history = emptyHistory();
+  const now = new Date();
+  for (let daysAgo = 0; daysAgo < 366; daysAgo += 1) {
+    const when = new Date(now);
+    when.setDate(when.getDate() - daysAgo);
+    history = recordUsage(
+      history,
+      {
+        promptTokens: 900_000_000,
+        completionTokens: 90_000_000,
+        totalTokens: 990_000_000,
+        contextTokens: 262_144,
+      },
+      when,
+    );
+  }
+  return recordTask(history, 42_660_000, now);
 }
 
 function assertWidth(lines: string[], width: number): void {

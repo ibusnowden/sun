@@ -239,6 +239,34 @@ By tool
   read   54k from 11 calls
 ```
 
+`/usage daily` (also `weekly` and `cumulative`) draws a year of activity as a
+contributions grid, with lifetime, peak day, current and best streak, and the
+longest single task:
+
+```text
+ Token activity   last 12 months
+ Lifetime 121.17M · Peak 5.34M · Streak 17d (best 17d) · Longest task 11h 10m
+
+      Aug       Sep     Oct     Nov       Dec     Jan     Feb     Mar  …
+ Su □ □ ■ □ □ □ □ ■ □ □ □ □ □ ■ ■ □ □ ■ □ ■ ■ ■ ■ ■ ■ ■ □ □ □ ■ □ □ ■ …
+ …
+
+   Less □ ■ ■ ■ ■ More
+   daily · weekly · cumulative
+```
+
+`daily` colours each day on its own, `weekly` gives every day in a column its
+week's total so the grid reads as bars, and `cumulative` shows the running
+total. Levels are quartiles of the non-zero values, so one enormous day cannot
+flatten everything else into the lowest step. A narrow terminal keeps the most
+recent weeks that fit and says how many it is showing.
+
+The layout, glyphs, and colours were read off a live `codex-cli 0.145.0` under
+a pty rather than guessed. One deliberate difference: Codex renders cells as a
+binary on/off even though its own legend promises "Less → More", so Sun gives
+the legend meaning with four steps whose brightest is Codex's exact colour — a
+saturated grid looks identical, a mixed one says more.
+
 Finally it reports **this week and this month**, which outlive the session.
 Spend is bucketed by local calendar day in `.agent/usage.json` (gitignored, and
 pruned past 400 days). The periods are calendar-based — a week begins Monday, a

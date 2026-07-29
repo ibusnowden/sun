@@ -16,6 +16,7 @@ import { executePlanPrompt, planPrompt } from "./agent/plan.ts";
 import {
   emptyHistory,
   loadHistory,
+  recordTask,
   recordUsage,
   saveHistory,
   summarize,
@@ -161,6 +162,7 @@ async function runSession(
       const prompt = mode === "plan" ? planPrompt(turn.prompt) : turn.prompt;
 
       const before = ui.totalTokens;
+      const startedAt = Date.now();
       const signal = ui.beginRun(prompt, turn.display);
       let result: RunResult | null = null;
       try {
@@ -182,6 +184,7 @@ async function runSession(
         ui.error(explain(error));
         lastState = "blocked";
       }
+      session.recordTask(Date.now() - startedAt);
       if (ui.exitRequested) break;
 
       // A finished plan is worth nothing until the user decides on it, so the
@@ -253,7 +256,14 @@ class SessionState {
         this.#usageDirty = true;
       },
       summary: () => summarize(this.#usage),
+      history: () => this.#usage,
     };
+  }
+
+  /** Wall time for one finished task, which the activity grid reports. */
+  recordTask(durationMs: number): void {
+    this.#usage = recordTask(this.#usage, durationMs);
+    this.#usageDirty = true;
   }
 
   async flushUsage(): Promise<void> {
@@ -533,6 +543,7 @@ In a session:
   /model                      Switch the model for the next turn
   /approvals                  Ask before each command, or run straight through
   /tokens                     Show what this session has spent
+  /usage [daily|weekly|…]     A year of token activity as a grid
   /diff  /files  /help        Inspect the run
   esc                         Interrupt, keeping the partial transcript
 

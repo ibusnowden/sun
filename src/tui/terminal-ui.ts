@@ -14,7 +14,11 @@ import type {
   ToolResult,
   ToolUsage,
 } from "../core/types.ts";
-import type { PeriodTotal } from "../agent/usage.ts";
+import type { PeriodTotal, UsageHistory } from "../agent/usage.ts";
+import {
+  isActivityMode,
+  renderActivity,
+} from "./heatmap.ts";
 import { listWorkspaceFiles } from "../repository/inspect.ts";
 import { renderHeader, renderRule } from "./chrome.ts";
 import { control, cursorToColumn, cursorUp } from "./theme.ts";
@@ -79,6 +83,8 @@ const TIPS = [
 export interface UsageController {
   record(usage: ModelUsage): void;
   summary(): { week: PeriodTotal; month: PeriodTotal };
+  /** The whole ledger, for the activity grid. */
+  history(): UsageHistory;
 }
 
 /** Read a model list and switch the session onto one. */
@@ -877,7 +883,29 @@ export class TerminalUI implements ApprovalHandler {
         this.#planCommand();
         break;
       case "tokens":
-      case "usage":
+      case "usage": {
+        const requested = argument.trim().toLowerCase();
+        if (requested) {
+          if (!isActivityMode(requested)) {
+            this.#write(
+              renderNote(
+                `Unknown view "${requested}". Try /usage daily, weekly, or cumulative.`,
+                width,
+              ),
+            );
+            break;
+          }
+          const history = this.#options.usage?.history();
+          this.#write(
+            history
+              ? renderActivity(history, requested, width)
+              : renderNote(
+                  "Activity history needs an interactive session.",
+                  width,
+                ),
+          );
+          break;
+        }
         this.#write(
           renderTokens(
             {
@@ -891,6 +919,7 @@ export class TerminalUI implements ApprovalHandler {
           ),
         );
         break;
+      }
       case "diff":
         this.#write(
           this.#changedFiles.length

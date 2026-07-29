@@ -21,6 +21,8 @@ export interface DailyUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Longest single task that finished on this day, in milliseconds. */
+  longestTaskMs?: number;
 }
 
 export interface UsageHistory {
@@ -69,6 +71,97 @@ export function recordUsage(
       },
     },
   };
+}
+
+/** Folds one finished task's wall time into its day, keeping the longest. */
+export function recordTask(
+  history: UsageHistory,
+  durationMs: number,
+  when: Date = new Date(),
+): UsageHistory {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) return history;
+  const key = dayKey(when);
+  const day = history.days[key] ?? {
+    calls: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+  };
+  return {
+    days: {
+      ...history.days,
+      [key]: {
+        ...day,
+        longestTaskMs: Math.max(day.longestTaskMs ?? 0, Math.round(durationMs)),
+      },
+    },
+  };
+}
+
+export interface LifetimeStats {
+  lifetimeTokens: number;
+  /** Heaviest single day. */
+  peakTokens: number;
+  /** Consecutive active days ending today or yesterday. */
+  streakDays: number;
+  bestStreakDays: number;
+  longestTaskMs: number;
+  activeDays: number;
+}
+
+/**
+ * A streak that ended yesterday is still running — the day is not over. Only a
+ * gap of two days or more breaks it.
+ */
+export function lifetimeStats(
+  history: UsageHistory,
+  now: Date = new Date(),
+): LifetimeStats {
+  const active = Object.entries(history.days)
+    .filter(
+      ([, day]) =>
+        day.totalTokens > 0 || day.calls > 0 || (day.longestTaskMs ?? 0) > 0,
+    )
+    .sort(([left], [right]) => (left < right ? -1 : 1));
+
+  const stats: LifetimeStats = {
+    lifetimeTokens: 0,
+    peakTokens: 0,
+    streakDays: 0,
+    bestStreakDays: 0,
+    longestTaskMs: 0,
+    activeDays: active.length,
+  };
+
+  let run = 0;
+  let previous: string | null = null;
+  for (const [key, day] of active) {
+    stats.lifetimeTokens += day.totalTokens;
+    stats.peakTokens = Math.max(stats.peakTokens, day.totalTokens);
+    stats.longestTaskMs = Math.max(stats.longestTaskMs, day.longestTaskMs ?? 0);
+    run = previous && daysBetween(previous, key) === 1 ? run + 1 : 1;
+    stats.bestStreakDays = Math.max(stats.bestStreakDays, run);
+    previous = key;
+  }
+
+  if (previous) {
+    const gap = daysBetween(previous, dayKey(now));
+    stats.streakDays = gap <= 1 ? run : 0;
+  }
+  return stats;
+}
+
+const MS_PER_DAY = 86_400_000;
+
+/** Whole days from `from` to `to`, both `YYYY-MM-DD`. */
+export function daysBetween(from: string, to: string): number {
+  return Math.round((parseDay(to).getTime() - parseDay(from).getTime()) / MS_PER_DAY);
+}
+
+/** Parses a `YYYY-MM-DD` key back into a local midnight Date. */
+export function parseDay(key: string): Date {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year ?? 1970, (month ?? 1) - 1, day ?? 1);
 }
 
 /** Monday of the week containing `when`, in local time. */
@@ -170,11 +263,15 @@ function asDaily(value: unknown): DailyUsage | null {
     typeof record[key] === "number" && Number.isFinite(record[key])
       ? Math.max(0, record[key])
       : 0;
+  const longestTaskMs = number("longestTaskMs");
   const day: DailyUsage = {
     calls: number("calls"),
     promptTokens: number("promptTokens"),
     completionTokens: number("completionTokens"),
     totalTokens: number("totalTokens"),
+    ...(longestTaskMs > 0 ? { longestTaskMs } : {}),
   };
-  return day.calls === 0 && day.totalTokens === 0 ? null : day;
+  return day.calls === 0 && day.totalTokens === 0 && longestTaskMs === 0
+    ? null
+    : day;
 }

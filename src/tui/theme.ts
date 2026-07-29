@@ -55,6 +55,22 @@ export function paint(value: string, ...names: ColorName[]): string {
   return `${prefix}${value}${ESCAPE}${CODES.reset}m`;
 }
 
+/**
+ * 24-bit foreground, for the one place a named colour is not enough: the
+ * activity heatmap needs a ramp, not a palette entry. Emitted exactly as
+ * `codex-cli` emits it (`38;2;r;g;b`), and suppressed with every other colour
+ * when colour is off.
+ */
+export function paintRgb(
+  value: string,
+  [red, green, blue]: readonly [number, number, number],
+  ...names: ColorName[]
+): string {
+  if (!colorEnabled || !value) return value;
+  const attributes = names.map((name) => `${ESCAPE}${CODES[name]}m`).join("");
+  return `${attributes}${ESCAPE}38;2;${red};${green};${blue}m${value}${ESCAPE}${CODES.reset}m`;
+}
+
 /** Sun's semantic palette. Every renderer paints through these names. */
 export const tone = {
   brand: (value: string) => paint(value, "yellow", "bold"),
