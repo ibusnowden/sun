@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
 import OpenAI from "openai";
 import { zodTextFormat } from "openai/helpers/zod";
 import type {
@@ -10,6 +8,7 @@ import type {
   ProviderObserver,
 } from "../core/types.ts";
 import { serializeForModel } from "./context-budget.ts";
+import { instructions } from "./instructions.ts";
 import { decisionEnvelopeSchema } from "./schemas.ts";
 
 export class OpenAIProvider implements ModelProvider {
@@ -44,7 +43,7 @@ export class OpenAIProvider implements ModelProvider {
       options.model,
       options.maxTokens ?? 16_384,
       options.contextTokens ?? 262_144,
-      await loadInstructions(),
+      instructions(),
       apiKey,
       options.observer ?? null,
     );
@@ -112,17 +111,4 @@ export class OpenAIProvider implements ModelProvider {
       });
     }
   }
-}
-
-async function loadInstructions(): Promise<string> {
-  const load = async (name: string): Promise<string> =>
-    await readFile(
-      fileURLToPath(new URL(`../../prompts/${name}.md`, import.meta.url)),
-      "utf8",
-    );
-  const [system, actor] = await Promise.all([
-    load("system"),
-    load("actor"),
-  ]);
-  return `${system}\n\n${actor}`;
 }

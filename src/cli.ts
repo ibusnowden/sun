@@ -60,14 +60,12 @@ interface Options {
   positionals: string[];
 }
 
-await main(Bun.argv.slice(2)).catch((error) => {
-  console.error(
-    sanitizeTerminalText(
-      error instanceof Error ? error.message : String(error),
-    ),
-  );
-  process.exitCode = 1;
-});
+// The entry call lives at the very bottom of this file, after every
+// declaration it reaches. Top-level await suspends module evaluation where it
+// sits, so calling main() from up here left `class SessionState` in its
+// temporal dead zone: fine under `bun run`, but a hard "Cannot access
+// 'SessionState' before initialization" in a `bun build --compile` binary,
+// which is the artifact users actually get.
 
 async function main(rawArgs: string[]): Promise<void> {
   const first = rawArgs[0];
@@ -553,3 +551,12 @@ The legacy inspect, work, and execute command names remain aliases for sun.`);
 function print(message: string): void {
   console.log(sanitizeTerminalText(message));
 }
+
+await main(Bun.argv.slice(2)).catch((error) => {
+  console.error(
+    sanitizeTerminalText(
+      error instanceof Error ? error.message : String(error),
+    ),
+  );
+  process.exitCode = 1;
+});

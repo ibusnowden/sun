@@ -16,3 +16,4 @@ dist/
 .agent/memory/profile.yaml
 .agent/memory/projects/
 .agent/memory/procedures/
+*.bun-build

@@ -38,7 +38,19 @@ bun install
 bun link
 ```
 
-Sun currently requires Linux with `bwrap` (Bubblewrap) installed.
+Sun requires Linux with `bwrap` (Bubblewrap) installed, and Bun ≥ 1.3 — the
+sandbox and the process layer are built on both, so neither is optional.
+
+For a standalone binary that carries its own runtime and prompts:
+
+```bash
+bun run build      # → dist/sun, a single ~100 MB executable
+./dist/sun --help
+```
+
+The prompts are embedded at build time via text imports rather than read from
+disk, so the binary works anywhere; `bun run check` (typecheck + tests) runs on
+`prepack`.
 
 After linking, `sun` is available globally:
 
