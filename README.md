@@ -255,7 +255,7 @@ that cache or log into `~` leave the workspace clean and Sun's change summary
 only reports your own edits. Terminal-bound model and command text is sanitized before display.
 
 Available slash commands are `/goal`, `/plan`, `/model`, `/approvals`,
-`/tokens`, `/diff`,
+`/usage`, `/diff`,
 `/files`, `/help`, `/clear`, and `/quit`. Typing `/` at the start of a line
 lists them under the composer, and `@` anywhere completes a workspace path;
 `↑`/`↓` move through the menu and `tab` accepts the highlight. Completing a
@@ -267,7 +267,10 @@ file, so `@` never quietly spends your context window.
 touching the conversation. `/approvals` chooses whether Sun stops before each
 command; the sandbox applies either way.
 
-`/tokens` (also `/usage`) breaks down what the session has spent: the running
+`/usage` has four views, named in the footer every one of them prints:
+`session · daily · weekly · cumulative`. Bare `/usage` is the grid.
+
+`/usage session` breaks down what this session has spent: the running
 total and prompt/completion split, the last call on its own, the per-call
 average, and the peak prompt as a share of the context window. The context line
 reports the peak prompt rather than the total, because only the prompt counts
@@ -284,8 +287,8 @@ By tool
   read   54k from 11 calls
 ```
 
-`/usage daily` (also `weekly` and `cumulative`) draws a year of activity as a
-contributions grid, with lifetime, peak day, current and best streak, and the
+`/usage` — or `/usage daily`, `weekly`, `cumulative` — draws a year of
+activity as a contributions grid, with lifetime, peak day, current and best streak, and the
 longest single task:
 
 ```text

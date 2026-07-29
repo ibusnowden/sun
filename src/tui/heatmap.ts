@@ -39,6 +39,25 @@ export function isActivityMode(value: string): value is ActivityMode {
   return (ACTIVITY_MODES as readonly string[]).includes(value);
 }
 
+/**
+ * Everything `/usage` can show. `session` is not a grid — it is this session's
+ * ledger and per-tool cost — but it belongs in the same footer as the three
+ * grid modes, because from the user's side they are four views of one
+ * question and the footer is the only place they are advertised.
+ */
+export type UsageView = "session" | ActivityMode;
+
+export const USAGE_VIEWS: readonly UsageView[] = ["session", ...ACTIVITY_MODES];
+
+export function isUsageView(value: string): value is UsageView {
+  return (USAGE_VIEWS as readonly string[]).includes(value);
+}
+
+/** The `session · daily · weekly · cumulative` row, current view highlighted. */
+export function usageFooter(active: UsageView): string {
+  return `   ${modeRow(active)}`;
+}
+
 const MUTED = [147, 153, 178] as const;
 const FIGURE = [250, 179, 135] as const;
 /** Level 4 is Codex's cell colour; the rest step down toward the background. */
@@ -101,7 +120,7 @@ export function renderActivity(
   lines.push(
     "",
     `   ${muted("Less")} ${cell(0)} ${cell(1)} ${cell(2)} ${cell(3)} ${cell(4)} ${muted("More")}`,
-    `   ${modeRow(mode)}`,
+    usageFooter(mode),
     "",
   );
   return lines;
@@ -252,8 +271,8 @@ function monthRow(starts: Date[], width: number): string {
   return muted(truncate(row, Math.max(1, width - GUTTER)));
 }
 
-function modeRow(active: ActivityMode): string {
-  return ACTIVITY_MODES.map((mode) =>
+function modeRow(active: UsageView): string {
+  return USAGE_VIEWS.map((mode) =>
     mode === active ? paintRgb(mode, FIGURE, "bold") : muted(mode),
   ).join(muted(" · "));
 }

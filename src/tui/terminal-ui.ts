@@ -16,8 +16,9 @@ import type {
 } from "../core/types.ts";
 import type { PeriodTotal, UsageHistory } from "../agent/usage.ts";
 import {
-  isActivityMode,
+  isUsageView,
   renderActivity,
+  usageFooter,
 } from "./heatmap.ts";
 import { listWorkspaceFiles } from "../repository/inspect.ts";
 import { renderHeader, renderRule } from "./chrome.ts";
@@ -1032,41 +1033,43 @@ export class TerminalUI implements ApprovalHandler {
       case "plan":
         this.#planCommand();
         break;
-      case "tokens":
       case "usage": {
-        const requested = argument.trim().toLowerCase();
-        if (requested) {
-          if (!isActivityMode(requested)) {
-            this.#write(
-              renderNote(
-                `Unknown view "${requested}". Try /usage daily, weekly, or cumulative.`,
-                width,
-              ),
-            );
-            break;
-          }
-          const history = this.#options.usage?.history();
+        // Bare `/usage` is the grid, because that is what the name promises.
+        // The session ledger is one of its views, not a separate command.
+        const requested = argument.trim().toLowerCase() || "daily";
+        if (!isUsageView(requested)) {
           this.#write(
-            history
-              ? renderActivity(history, requested, width)
-              : renderNote(
-                  "Activity history needs an interactive session.",
-                  width,
-                ),
+            renderNote(
+              `Unknown view "${requested}". Try /usage session, daily, weekly, or cumulative.`,
+              width,
+            ),
           );
           break;
         }
+        if (requested === "session") {
+          this.#write([
+            ...renderTokens(
+              {
+                ledger: this.#ledger,
+                tools: [...this.#toolUsage.values()].sort(
+                  (left, right) => right.outputTokens - left.outputTokens,
+                ),
+                periods: this.#options.usage?.summary() ?? null,
+              },
+              width,
+            ),
+            // Carries the same footer as the grid, so the other three views
+            // are reachable from here rather than only from the grid.
+            usageFooter("session"),
+            "",
+          ]);
+          break;
+        }
+        const history = this.#options.usage?.history();
         this.#write(
-          renderTokens(
-            {
-              ledger: this.#ledger,
-              tools: [...this.#toolUsage.values()].sort(
-                (left, right) => right.outputTokens - left.outputTokens,
-              ),
-              periods: this.#options.usage?.summary() ?? null,
-            },
-            width,
-          ),
+          history
+            ? renderActivity(history, requested, width)
+            : renderNote("Activity history needs an interactive session.", width),
         );
         break;
       }

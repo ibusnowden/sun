@@ -607,8 +607,7 @@ In a session:
   /plan                       Investigate and propose without changing anything
   /model                      Switch the model for the next turn
   /approvals                  Ask before each command, or run straight through
-  /tokens                     Show what this session has spent
-  /usage [daily|weekly|…]     A year of token activity as a grid
+  /usage [session|daily|…]    Token activity: this session, or a year as a grid
   /diff  /files  /help        Inspect the run
   esc                         Interrupt, keeping the partial transcript
 

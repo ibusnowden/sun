@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import type { RunResult, ToolCall } from "../src/core/types.ts";
 import { setColorEnabled, stripAnsi } from "../src/tui/theme.ts";
-import { TerminalUI } from "../src/tui/terminal-ui.ts";
+import {
+  TerminalUI,
+  type TerminalUIOptions,
+} from "../src/tui/terminal-ui.ts";
 
-function harness() {
+function harness(options: Partial<TerminalUIOptions> = {}) {
   const chunks: string[] = [];
   const ui = new TerminalUI({
     version: "0.1.0",
@@ -11,6 +14,7 @@ function harness() {
     model: "glm-5.2",
     repository: "/repo",
     output: { write: (chunk: string) => void chunks.push(chunk) },
+    ...options,
   });
   // Cursor movement and erases are terminal plumbing; assertions read the text.
   const text = (): string =>
@@ -502,7 +506,7 @@ describe("TerminalUI", () => {
     ui.stop();
   });
 
-  test("/tokens totals the session and reports the peak against the window", () => {
+  test("/usage session totals the session and reports the peak against the window", () => {
     const { ui, text } = harness();
     ui.start();
     ui.beginRun("do the work");
@@ -531,7 +535,7 @@ describe("TerminalUI", () => {
       failed: false,
     });
 
-    ui.feedKeys("/tokens\r");
+    ui.feedKeys("/usage session\r");
     const shown = text();
     expect(shown).toContain("22k over 2 model calls");
     expect(shown).toContain("20k in, 2k out");
@@ -542,11 +546,44 @@ describe("TerminalUI", () => {
     ui.stop();
   });
 
-  test("/tokens says so plainly before any model call", () => {
+  test("/usage session says so plainly before any model call", () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.feedKeys("/usage session\r");
+    expect(text()).toContain("No model calls yet");
+    ui.stop();
+  });
+
+  test("bare /usage is the grid, not the session ledger", () => {
+    const { ui, text } = harness({
+      usage: {
+        history: () => ({ days: {} }),
+        summary: () => null,
+      } as never,
+    });
+    ui.start();
+    ui.feedKeys("/usage\r");
+    const shown = text();
+    expect(shown).toContain("Token activity");
+    // The footer advertises all four views, with daily the active one.
+    expect(shown).toContain("session · daily · weekly · cumulative");
+    expect(shown).not.toContain("No model calls yet");
+    ui.stop();
+  });
+
+  test("/tokens is gone rather than quietly aliased", () => {
     const { ui, text } = harness();
     ui.start();
     ui.feedKeys("/tokens\r");
-    expect(text()).toContain("No model calls yet");
+    expect(text()).toContain("Unknown command /tokens");
+    ui.stop();
+  });
+
+  test("an unknown view names all four, session included", () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.feedKeys("/usage yearly\r");
+    expect(text()).toContain("/usage session, daily, weekly, or cumulative");
     ui.stop();
   });
 
@@ -606,7 +643,7 @@ describe("TerminalUI", () => {
     setColorEnabled(false);
   });
 
-  test("/tokens attributes cost to the tool that produced the output", () => {
+  test("/usage session attributes cost to the tool that produced the output", () => {
     const { ui, text } = harness();
     ui.start();
     ui.beginRun("do the work");
@@ -622,7 +659,7 @@ describe("TerminalUI", () => {
       });
     }
 
-    ui.feedKeys("/tokens\r");
+    ui.feedKeys("/usage session\r");
     const shown = text();
     expect(shown).toContain("By tool");
     // Heaviest first: bash's two calls outweigh read's one.
