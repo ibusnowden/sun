@@ -37,6 +37,12 @@ export interface HeaderView {
   repository: string;
   /** Shown under the box; omitted when empty. */
   tip?: string;
+  /**
+   * Outranks the tip when set. A rotating hint is worth showing only while
+   * there is nothing more useful to say, and "your install is out of date" is
+   * more useful than any of them.
+   */
+  notice?: string;
 }
 
 export function renderHeader(view: HeaderView, width: number): string[] {
@@ -80,14 +86,13 @@ export function renderHeader(view: HeaderView, width: number): string[] {
     `${BOX.bottomLeft}${BOX.horizontal.repeat(content + 2)}${BOX.bottomRight}`,
   ];
 
-  if (!view.tip) return ["", ...lines, ""];
-  return [
-    "",
-    ...lines,
-    "",
-    `  ${tone.muted(`Tip: ${truncate(view.tip, Math.max(1, width - 7))}`)}`,
-    "",
-  ];
+  const footer = view.notice
+    ? `  ${tone.brand(truncate(view.notice, Math.max(1, width - 2)))}`
+    : view.tip
+      ? `  ${tone.muted(`Tip: ${truncate(view.tip, Math.max(1, width - 7))}`)}`
+      : null;
+  if (!footer) return ["", ...lines, ""];
+  return ["", ...lines, "", footer, ""];
 }
 
 /**

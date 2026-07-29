@@ -17,7 +17,9 @@
     "openai-compatible",
     "bun"
   ],
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "sun": "./src/cli.ts"
   },

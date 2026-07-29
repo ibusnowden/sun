@@ -115,6 +115,8 @@ export interface TerminalUIOptions {
   mode: RunMode;
   model: string;
   repository: string;
+  /** Shown under the header in place of the rotating tip, when set. */
+  notice?: string;
   /** Injectable sink for tests; defaults to the real terminal. */
   output?: { write(chunk: string): void };
   /** Injectable workspace listing for `@` completion; defaults to a real walk. */
@@ -265,6 +267,7 @@ export class TerminalUI implements ApprovalHandler {
           version: this.#options.version,
           model: this.#currentModel(),
           repository: this.#options.repository,
+          ...(this.#options.notice ? { notice: this.#options.notice } : {}),
           tip: TIPS[Math.floor(Math.random() * TIPS.length)] ?? TIPS[0],
         },
         this.#width(),

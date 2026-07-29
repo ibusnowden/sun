@@ -66,6 +66,25 @@ describe("Codex UI contract", () => {
     expect(visibleWidth(top)).toBeLessThan(100);
   });
 
+  test("an update notice replaces the rotating tip under the header", () => {
+    const text = plain(
+      renderHeader(
+        {
+          name: "Sun",
+          version: "0.1.0",
+          model: "glm-5.2",
+          repository: "/project/inniang/sun",
+          notice: "Update available: 0.1.0 → 0.2.0. Run `sun update`.",
+          tip: "Type @ to complete a workspace path.",
+        },
+        100,
+      ),
+    );
+
+    expect(text).toContain("Update available: 0.1.0 → 0.2.0");
+    expect(text).not.toContain("Tip:");
+  });
+
   test("a user message, narration, and answer each take one marker", () => {
     expect(plain(renderTask("refactor the config loader", 80))).toContain(
       "› refactor the config loader",

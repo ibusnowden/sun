@@ -3,6 +3,7 @@
     "target": "ES2023",
     "module": "Preserve",
     "moduleResolution": "bundler",
+    "resolveJsonModule": true,
     "lib": ["ES2023"],
     "types": ["bun"],
     "strict": true,

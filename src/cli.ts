@@ -45,9 +45,17 @@ import {
   type UsageController,
 } from "./tui/terminal-ui.ts";
 import { sanitizeTerminalText } from "./tui/theme.ts";
+import { checkForUpdate, installLatest, updateNotice } from "./update.ts";
+import { PACKAGE_NAME, VERSION } from "./version.ts";
 
-const VERSION = "0.1.0";
-const COMMANDS = new Set(["init", "doctor", "inspect", "work", "execute"]);
+const COMMANDS = new Set([
+  "init",
+  "doctor",
+  "update",
+  "inspect",
+  "work",
+  "execute",
+]);
 
 interface Options {
   repository: string;
@@ -57,6 +65,7 @@ interface Options {
   apiKeyEnv?: string;
   plain: boolean;
   plan: boolean;
+  check: boolean;
   maxToolCalls?: number;
   positionals: string[];
 }
@@ -93,6 +102,10 @@ async function main(rawArgs: string[]): Promise<void> {
     await doctorCommand(options);
     return;
   }
+  if (command === "update") {
+    await updateCommand(options);
+    return;
+  }
 
   const task = options.positionals.join(" ").trim();
   const interactive =
@@ -111,7 +124,7 @@ async function main(rawArgs: string[]): Promise<void> {
   });
 
   const mode: RunMode = options.plan ? "plan" : "work";
-  if (interactive) await runSession(config, task, mode);
+  if (interactive) await runSession(config, task, mode, await startupNotice());
   else await runPlain(config, task, mode);
 }
 
@@ -119,12 +132,14 @@ async function runSession(
   config: SunConfig,
   firstTask: string,
   mode: RunMode,
+  notice?: string,
 ): Promise<void> {
   const session = new SessionState(config);
   await session.load();
 
   const ui = new TerminalUI({
     version: VERSION,
+    ...(notice ? { notice } : {}),
     mode,
     model: config.model,
     repository: config.repository,
@@ -463,11 +478,50 @@ async function doctorCommand(options: Options): Promise<void> {
   }
 }
 
+/**
+ * `sun update` reports honestly and only then acts. `--check` stops after the
+ * report, which is what a script or a curious user wants; the bare form
+ * installs, but still says nothing is needed when nothing is.
+ */
+async function updateCommand(options: Options): Promise<void> {
+  // An explicit update ignores the daily cache: the user asking is a stronger
+  // signal than "we looked this morning".
+  const update = await checkForUpdate({ force: true });
+  if (!update) {
+    print(
+      `Sun ${VERSION}. Could not reach the registry to check for updates — ${PACKAGE_NAME} may not be published yet.`,
+    );
+    return;
+  }
+  if (!update.outdated) {
+    print(`Sun ${update.current} is the latest version.`);
+    return;
+  }
+
+  print(`Update available: ${update.current} → ${update.latest}`);
+  if (options.check) return;
+
+  print("Installing…");
+  const result = await installLatest();
+  if (!result.ok) throw new Error(result.message);
+  print(`Updated to ${update.latest}. Restart sun to pick it up.`);
+}
+
+/**
+ * The startup check, for interactive sessions only. Scripted runs (`--plain`)
+ * are left alone: a pipeline should not pay a network timeout, and its output
+ * belongs to the caller rather than to a banner.
+ */
+async function startupNotice(): Promise<string | undefined> {
+  return updateNotice(await checkForUpdate()) ?? undefined;
+}
+
 function parseOptions(args: string[]): Options {
   const options: Options = {
     repository: process.cwd(),
     plain: false,
     plan: false,
+    check: false,
     positionals: [],
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -477,6 +531,8 @@ function parseOptions(args: string[]): Options {
       options.plain = true;
     } else if (value === "--plan") {
       options.plan = true;
+    } else if (value === "--check") {
+      options.check = true;
     } else if (value === "--repo") {
       options.repository = resolve(requiredValue(args, ++index, value));
     } else if (value.startsWith("--repo=")) {
@@ -533,6 +589,7 @@ Usage:
   sun --plan "task"           Start in plan mode: propose, change nothing
   sun init [directory]        Create .agent/config.toml
   sun doctor                  Check the configured model
+  sun update [--check]        Install the latest release, or just report it
 
 Options:
   --repo <path>               Workspace (default: current directory)

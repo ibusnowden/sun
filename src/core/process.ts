@@ -76,10 +76,15 @@ export async function runProcess(
 /**
  * Runs a command OUTSIDE the sandbox, with the user's real environment and
  * credentials. This is the one capability the sandbox exists to withhold, so
- * it is deliberately not reachable from the `bash` tool: the only caller is
- * the publish path in `tools/publish.ts`, which builds a fixed `git push`
- * argv from validated fields and runs only after the user approves the exact
- * commit being pushed. Never route model-supplied command strings here.
+ * it is deliberately not reachable from the `bash` tool. Both callers build a
+ * fixed argv from validated fields, and neither is reachable by the model:
+ *
+ * 1. `tools/publish.ts` — a `git push` that runs only after the user approves
+ *    the exact commit being pushed.
+ * 2. `update.ts` — a `bun install -g` that runs only from the `sun update`
+ *    command the user typed.
+ *
+ * Never route model-supplied command strings here.
  */
 export async function runTrustedProcess(
   command: string[],

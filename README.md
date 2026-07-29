@@ -34,12 +34,21 @@ straight back as the next task.
 ## Install
 
 ```bash
-bun install
-bun link
+bun install -g @ibusnowden/sun
 ```
 
 Sun requires Linux with `bwrap` (Bubblewrap) installed, and Bun ≥ 1.3 — the
-sandbox and the process layer are built on both, so neither is optional.
+sandbox and the process layer are built on both, so neither is optional. Bun is
+also what installs it: the published `bin` is TypeScript with a `#!/usr/bin/env
+bun` shebang, so `npm i -g` would fetch the package and then fail to run it.
+Install with Bun, or take the standalone binary below.
+
+To work on Sun itself, link the checkout instead:
+
+```bash
+bun install
+bun link
+```
 
 For a standalone binary that carries its own runtime and prompts:
 
@@ -50,9 +59,9 @@ bun run build      # → dist/sun, a single ~100 MB executable
 
 The prompts are embedded at build time via text imports rather than read from
 disk, so the binary works anywhere; `bun run check` (typecheck + tests) runs on
-`prepack`.
+`prepack`. Tagged releases attach the same binary to the GitHub release.
 
-After linking, `sun` is available globally:
+Once installed, `sun` is available globally:
 
 ```bash
 cd /project/inniang
@@ -70,6 +79,30 @@ sun --plain "print the package name"
 
 The old `sun inspect`, `sun work`, and `sun execute` forms remain aliases, but
 they all run the same simple agent.
+
+## Updating
+
+```bash
+sun update           # install the latest release
+sun update --check   # report what is available, change nothing
+```
+
+Interactive sessions check once a day and, when there is something newer, say
+so on one line under the header. The check is cached in
+`$XDG_CACHE_HOME/sun/update.json` (falling back to `~/.cache`), never runs
+under `--plain` so scripted use pays nothing for it, and treats every failure —
+offline, rate-limited, package not yet published — as "nothing to report"
+rather than as an error. A registry lookup is not allowed to stop Sun starting.
+
+`sun update` delegates to `bun install -g`, because whatever installed Sun is
+the thing that knows how to replace it. Run from a `bun link`ed checkout it
+refuses and points at `git pull`, rather than shadowing your working tree with
+a registry copy.
+
+Releases are cut by pushing a tag: `v0.2.0` publishes 0.2.0 to npm and attaches
+a Linux binary to the GitHub release. CI refuses a tag that disagrees with
+`package.json`, and the version the CLI reports is read from that same manifest
+(`src/version.ts`), so the three can never drift apart.
 
 ## Local GLM-5.2
 
