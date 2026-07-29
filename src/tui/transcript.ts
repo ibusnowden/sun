@@ -50,7 +50,9 @@ export interface DiffStats {
  * already uses for work in flight; paths stay a plain heading.
  */
 function targetTone(tool: ToolName): (value: string) => string {
-  return tool === "bash" || tool === "publish" ? tone.running : tone.heading;
+  return tool === "bash" || tool === "publish" || tool === "fetch"
+    ? tone.running
+    : tone.heading;
 }
 
 const TOOL_VERB: Record<ToolName, string> = {
@@ -58,6 +60,7 @@ const TOOL_VERB: Record<ToolName, string> = {
   edit: "Edited",
   write: "Created",
   bash: "Ran",
+  fetch: "Fetched",
   publish: "Published",
 };
 
@@ -281,6 +284,9 @@ export function describeCall(call: ToolCall): string {
   }
   if (call.tool === "edit" || call.tool === "write") {
     return String(call.input.path ?? "");
+  }
+  if (call.tool === "fetch") {
+    return String(call.input.url ?? "");
   }
   if (call.tool === "publish") {
     const remote = String(call.input.remote ?? "origin");

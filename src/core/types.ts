@@ -3,7 +3,13 @@ import type { GoalVerdict } from "../agent/goal.ts";
 /** `plan` investigates and proposes; only `work` may change anything. */
 export type RunMode = "work" | "plan";
 export type ProviderKind = "openai" | "openai-compatible";
-export type ToolName = "read" | "edit" | "write" | "bash" | "publish";
+export type ToolName =
+  | "read"
+  | "edit"
+  | "write"
+  | "bash"
+  | "fetch"
+  | "publish";
 
 export interface SunConfig {
   repository: string;

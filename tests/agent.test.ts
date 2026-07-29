@@ -133,6 +133,48 @@ describe("Agent", () => {
     ).toBeTrue();
   });
 
+  test("asks before fetching a URL, and a refusal reaches no network", async () => {
+    const temporary = await temporaryDirectory();
+    cleanups.push(temporary.cleanup);
+    git(temporary.path, "init", "-b", "main");
+    const config = await loadConfig(temporary.path);
+    const asked: string[] = [];
+    const events: RuntimeEvent[] = [];
+    const agent = await Agent.create({
+      config,
+      provider: new ScriptedProvider([
+        {
+          kind: "tool",
+          call: {
+            tool: "fetch",
+            rationale: "Checking the upstream changelog.",
+            input: { url: "https://example.com/changelog" },
+          },
+        },
+        { kind: "complete", summary: "Did not fetch." },
+      ]),
+      approval: {
+        confirm: async (request) => {
+          asked.push(request.command ?? "");
+          return false;
+        },
+      },
+      sink: (event) => void events.push(event),
+    });
+
+    await agent.run("What changed upstream?");
+
+    // The URL is on the card, so the user approves an address rather than the
+    // word "fetch".
+    expect(asked).toEqual(["https://example.com/changelog"]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "tool_end" && event.result.summary === "Fetch skipped",
+      ),
+    ).toBeTrue();
+  });
+
   test("keeps follow-up context for the lifetime of the TUI", async () => {
     const temporary = await temporaryDirectory();
     cleanups.push(temporary.cleanup);

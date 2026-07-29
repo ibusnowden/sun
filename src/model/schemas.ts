@@ -40,6 +40,14 @@ const bashCall = z.object({
   }),
 });
 
+const fetchCall = z.object({
+  tool: z.literal("fetch"),
+  rationale: z.string().min(1),
+  input: z.object({
+    url: z.string().min(1),
+  }),
+});
+
 const publishCall = z.object({
   tool: z.literal("publish"),
   rationale: z.string().min(1),
@@ -59,6 +67,7 @@ export const decisionEnvelopeSchema = z.object({
         editCall,
         writeCall,
         bashCall,
+        fetchCall,
         publishCall,
       ]),
     }),

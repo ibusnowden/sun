@@ -40,6 +40,27 @@ async function setup(
 }
 
 describe("ToolRegistry", () => {
+  test("fetch is reachable through execute and refuses private addresses", async () => {
+    const { registry } = await setup();
+
+    // Proves the schema, the dispatch case, and the guard are wired together:
+    // this is the seam the unit tests on fetchUrl cannot see.
+    const refused = await registry.execute({
+      tool: "fetch",
+      rationale: "Checking the local router.",
+      input: { url: "http://127.0.0.1:4000/v1/models" },
+    });
+    expect(refused.ok).toBe(false);
+    expect(refused.summary).toContain("private or loopback");
+
+    const badInput = await registry.execute({
+      tool: "fetch",
+      rationale: "Missing the URL entirely.",
+      input: {},
+    });
+    expect(badInput.ok).toBe(false);
+  });
+
   test("reads, exact-edits, writes, and runs bash", async () => {
     const { root, registry } = await setup();
     await writeFile(join(root, "app.txt"), "hello world\n");

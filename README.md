@@ -1,11 +1,11 @@
 # Sun
 
 Sun is a small TypeScript/Bun coding agent with a terminal UI. It points at an
-OpenAI-compatible model, works directly in the current workspace, and has five
+OpenAI-compatible model, works directly in the current workspace, and has six
 tools:
 
 ```text
-read  edit  write  bash  publish
+read  edit  write  bash  fetch  publish
 ```
 
 There is one loop:
@@ -198,6 +198,43 @@ Every modal choice is the same numbered list — approving a command, `/model`,
 
   Press enter to confirm, esc to skip the command
 ```
+
+## Reading the web
+
+`fetch` takes one absolute `http`/`https` URL and returns the page as text.
+HTML is stripped to its words before the model sees it, because markup is most
+of a page's bytes and almost none of its meaning. Every fetch shows the URL on
+an approval card first — it is the one thing a turn does that leaves your
+machine.
+
+It does **not** loosen the sandbox. Bash still runs under `--unshare-all` with
+no network whatsoever; `fetch` runs in Sun's own process instead, so the one
+network path is this narrow validated one rather than a hole in bwrap.
+
+The guard that matters is SSRF. Sun usually runs somewhere that can see things
+the open internet cannot — a metadata endpoint on `169.254.169.254`, a model
+router on `127.0.0.1:4000`, an admin panel on `10.x`. So:
+
+- only `http` and `https`; no `file:`, no credentials in the URL;
+- every hostname is resolved and **every** returned address checked against the
+  loopback, link-local, RFC1918, CGNAT, multicast and reserved ranges, IPv6
+  included, and IPv4-mapped IPv6 unwrapped first;
+- `localhost`, `*.localhost`, `*.internal`, `*.local` and the known metadata
+  names are refused by name whatever DNS claims;
+- redirects are followed **by hand**, re-running the whole check at every hop,
+  because a public host redirecting to a private one is the actual attack;
+- responses are capped, timed out, and non-text content types are declined
+  rather than dumped into the context window.
+
+One limitation, stated plainly rather than papered over: this does not stop DNS
+rebinding. The name is resolved once for the check and again by the request
+itself, and a server that answers differently each time can slip between them.
+Closing that needs connection-level address pinning that Bun's `fetch` does not
+expose.
+
+Fetched pages arrive fenced in `<fetched url="…">` and the system prompt names
+them as data. A page telling Sun to ignore its instructions is an attack to
+report, not an order to follow.
 
 ## Goals
 

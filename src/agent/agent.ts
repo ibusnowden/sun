@@ -145,6 +145,20 @@ export class Agent {
             summary: "Command skipped",
             output: "",
           };
+    } else if (call.tool === "fetch") {
+      // Bash cannot reach the network, so a fetch is the one thing a turn does
+      // that leaves this machine. The user sees the URL before it is requested.
+      const action = `fetch: ${call.rationale}`;
+      const reason = "Sun asks before requesting a URL. This leaves your machine.";
+      await this.sink({ type: "approval", action, reason });
+      const approved = await this.approval.confirm({
+        action,
+        reason,
+        command: String(call.input.url ?? ""),
+      });
+      result = approved
+        ? await this.#tools.execute(call)
+        : { ok: false, summary: "Fetch skipped", output: "" };
     } else {
       result = await this.#tools.execute(call);
     }

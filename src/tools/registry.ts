@@ -13,6 +13,7 @@ import { estimateTokens } from "../model/context-budget.ts";
 import { PLAN_BLOCKED_TOOLS, planRefusal } from "../agent/plan.ts";
 import { runProcess } from "../core/process.ts";
 import { PathGuard } from "./path-guard.ts";
+import { fetchUrl } from "./fetch.ts";
 import {
   executePublish,
   preparePublish,
@@ -39,6 +40,9 @@ const schemas = {
   bash: z.object({
     command: z.string().min(1),
     timeoutMs: z.number().int().positive().optional(),
+  }),
+  fetch: z.object({
+    url: z.string().min(1),
   }),
   publish: z.object({
     remote: z.string().min(1).nullish(),
@@ -130,6 +134,8 @@ export class ToolRegistry {
           return await this.#write(schemas.write.parse(call.input));
         case "bash":
           return await this.#bash(schemas.bash.parse(call.input));
+        case "fetch":
+          return await this.#fetch(schemas.fetch.parse(call.input));
         case "publish":
           // Publishing leaves the sandbox, so it is only reachable through
           // plan() → user approval → publish(). Reaching it here means a
@@ -233,6 +239,15 @@ export class ToolRegistry {
         existing,
       },
     };
+  }
+
+  /**
+   * The only tool that reaches the network. It runs in Sun's own process
+   * because the Bash sandbox has no network by design — see tools/fetch.ts for
+   * what stops that becoming a way into the private network.
+   */
+  async #fetch(input: z.infer<typeof schemas.fetch>): Promise<ToolResult> {
+    return await fetchUrl(input, { maxBytes: this.config.maxOutputBytes });
   }
 
   async #bash(input: z.infer<typeof schemas.bash>): Promise<ToolResult> {

@@ -4,6 +4,10 @@ Use `read` for a known file, `edit` for an exact replacement, `write` for a
 new file or intentional overwrite, and `bash` for discovery, search, local Git,
 or tests. Do not repeat an action whose result is already in `recentEvents`.
 
+Use `fetch` for one absolute http/https URL when the answer is not in the
+workspace. Prefer a specific documentation page over a search engine, and do
+not fetch a URL whose content is already in `recentEvents`.
+
 Use `publish` to push commits to a remote, which Bash cannot do. Leave
 `remote`, `branch`, and `setUpstream` null to publish the current branch to its
 usual remote; set them only when the user names something different. Commit
