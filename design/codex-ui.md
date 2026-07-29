@@ -1,10 +1,13 @@
 # The Codex UI, as captured
 
 Reference for Sun's terminal interface. Everything below was read off a live
-`codex-cli 0.145.0` driven under a pty at 110 columns, plus the goal state
-model recovered from the binary and `~/.codex/goals_1.sqlite`. This file
-supersedes `design/*.png` and `design/gutter.ts`, which describe the earlier
+`codex-cli` driven under a pty at 110 columns, plus the goal state model
+recovered from the binary and `~/.codex/goals_1.sqlite`. This file supersedes
+`design/*.png` and `design/gutter.ts`, which describe the earlier
 gutter-and-columns interface.
+
+Sections up to and including `/goal` were captured from 0.145.0; the `/diff`
+pager was captured from 0.146.0.
 
 The organising idea: **one bullet per event, at column 0, with detail indented
 under it.** There is no gutter, no tool-name column, no right-aligned meta, and
@@ -186,3 +189,82 @@ Behaviour, from the embedded steering templates
 Sun's adaptation of the last point: the model reports a goal verdict on the
 `complete` decision, and the session loop — not the model — decides whether
 that ends the goal.
+
+## `/diff`
+
+Menu entry: `show git diff (including untracked files)`.
+
+Unlike every other command, this one does not write to the transcript. It takes
+over the **alternate screen** (`\e[?1049h`, cursor hidden) and runs as a pager
+until dismissed:
+
+```
+/ D I F F / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
+diff --git a/math.js b/math.js
+index 0604766..0bd82db 100644
+--- a/math.js
++++ b/math.js
+@@ -1,3 +1,7 @@
+ export function add(a, b) {
+   return a + b
+ }
++
++export function subtract(a, b) {
++  return a - b
++}
+~
+~
+──────────────────────────────────────────────────────────────────────── 0% ─
+ ↑/↓ to scroll   pgup/pgdn to page   home/end to jump
+ q to quit
+```
+
+The body is **raw `git diff`** — `index`, `---`/`+++`, and `@@` are all kept,
+where the transcript's own edit preview strips them. Rows past the end of the
+content are filled with a vim-style `~`.
+
+Layout, for a terminal of `R` rows and `W` columns:
+
+| row | content |
+| --- | --- |
+| 1 | `/ D I F F ` then `/ ` repeated, sliced to exactly `W`, dim |
+| 2 … R−4 | body, so body height is `R − 5` |
+| R−3 | `─` × (`W` − tail) then ` N% ─`, dim |
+| R−2 | ` ↑/↓ to scroll   pgup/pgdn to page   home/end to jump`, dim |
+| R−1 | ` q to quit`, dim |
+| R | blank |
+
+Painting, measured off the byte stream:
+
+| line | SGR |
+| --- | --- |
+| `diff --git`, `index`, `---`, `+++` | bold |
+| `@@ … @@` | `38;5;6` |
+| `-` | `38;5;1` |
+| `+` | `38;5;2` |
+| context, `~` | default |
+
+Long lines **hard-wrap at the column**, not at a word boundary: a 292-column
+addition broke at exactly 110, mid-token. Diff bodies are code, and a word wrap
+would misalign the columns being compared.
+
+The percentage is `offset / (total − height)`, so it reads 0% at the top and
+100% once the last row is on screen; a diff shorter than the body is 100%.
+`pgup`/`pgdn` move by exactly one body height.
+
+Keys, probed one at a time:
+
+| key | effect |
+| --- | --- |
+| `↑` / `↓`, `j` / `k` | ± 1 row |
+| `pgup` / `pgdn` | ± one body height |
+| `home` / `end` | first / last row |
+| `q`, `esc` | close |
+| `gg`, `G`, `ctrl+d`, `ctrl+u` | **nothing** |
+
+So the vim inheritance is partial and undocumented: `j`/`k` and the `~` filler
+are vim, but the jump and half-page motions are not bound. Only the arrow, page,
+and home/end keys are advertised in the footer.
+
+With a clean tree the pager still opens, showing `No changes detected.` on the
+first body row, `~` below it, and a 100% rule.

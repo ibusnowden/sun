@@ -11,6 +11,12 @@ export const control = {
   // frame at once instead of showing it mid-redraw. Others ignore it.
   syncStart: `${ESCAPE}?2026h`,
   syncEnd: `${ESCAPE}?2026l`,
+  // The alternate screen, used only by the pager. Leaving it restores the
+  // scrollback underneath exactly as it was, so a full-screen view costs the
+  // transcript nothing.
+  enterAlternate: `${ESCAPE}?1049h`,
+  exitAlternate: `${ESCAPE}?1049l`,
+  home: `${ESCAPE}H`,
 } as const;
 
 export function cursorUp(rows: number): string {

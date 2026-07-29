@@ -92,7 +92,7 @@ export async function captureRepositoryBaseline(
       workspaceMode: true,
     };
   }
-  const status = await repositoryStatus(config);
+  const { status } = await repositoryStatus(config);
   return {
     fingerprints: await fingerprints(config, status),
   };
@@ -104,6 +104,8 @@ export async function repositoryChanges(
 ): Promise<{
   files: string[];
   diff: string;
+  /** Set when Git could not read the workspace at all, rather than finding it clean. */
+  unreadable?: string;
 }> {
   if (config.workspaceMode) {
     const current = await workspaceFingerprints(config.repository);
@@ -120,7 +122,12 @@ export async function repositoryChanges(
         : "",
     };
   }
-  const status = await repositoryStatus(config);
+  const { status, error } = await repositoryStatus(config);
+  // "Git failed" and "nothing changed" both produce an empty status. Telling
+  // them apart matters most for a workspace nested inside a larger repository:
+  // the sandbox binds only the workspace, so Git cannot reach the enclosing
+  // `.git` and would otherwise report a dirty tree as clean.
+  if (error) return { files: [], diff: "", unreadable: error };
   const currentFingerprints = await fingerprints(config, status);
   const files = baseline
     ? changedSinceBaseline(baseline.fingerprints, currentFingerprints)
@@ -153,7 +160,7 @@ export async function repositoryChanges(
 
 async function repositoryStatus(
   config: SunConfig,
-): Promise<Map<string, string>> {
+): Promise<{ status: Map<string, string>; error?: string }> {
   const result = await git(config, [
     "status",
     "--porcelain=v1",
@@ -163,7 +170,13 @@ async function repositoryStatus(
     ".",
     ":(exclude).agent",
   ]);
-  return parsePorcelain(result.stdout);
+  if (result.exitCode !== 0) {
+    return {
+      status: new Map(),
+      error: result.stderr.trim().split("\n")[0] ?? "git status failed",
+    };
+  }
+  return { status: parsePorcelain(result.stdout) };
 }
 
 async function fingerprints(

@@ -35,6 +35,7 @@ import { createModelProvider } from "./model/provider-factory.ts";
 import {
   assertWorkspaceDirectory,
   isGitRepository,
+  repositoryChanges,
 } from "./repository/inspect.ts";
 import { PlainUI } from "./tui/plain-ui.ts";
 import {
@@ -130,6 +131,15 @@ async function runSession(
     models: session.models(),
     goal: session.goals(),
     usage: session.usageController(),
+    // No baseline, so this is the whole working tree rather than one turn's
+    // changes — the same thing `git diff` would show, untracked files included.
+    workingDiff: async () => {
+      const changes = await repositoryChanges(config);
+      // Saying "no changes" when Git could not read the tree at all would be a
+      // lie in exactly the case the user most needs the truth.
+      if (changes.unreadable) throw new Error(changes.unreadable);
+      return changes.diff;
+    },
   });
   ui.start();
 

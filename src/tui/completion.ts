@@ -33,7 +33,7 @@ export const SLASH_COMMANDS: readonly CompletionItem[] = [
   { value: "plan", detail: "investigate and propose without changing anything" },
   { value: "tokens", detail: "show what this session has spent" },
   { value: "usage", detail: "a year of token activity: daily, weekly, cumulative" },
-  { value: "diff", detail: "print the full working diff" },
+  { value: "diff", detail: "show git diff (including untracked files)" },
   { value: "files", detail: "list files Sun has touched" },
   { value: "help", detail: "show this list" },
   { value: "clear", detail: "clear the screen" },

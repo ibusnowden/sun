@@ -44,11 +44,18 @@ import {
   type SelectView,
 } from "./select.ts";
 import {
+  pagerScroll,
+  refitPager,
+  renderPager,
+  wrapPatch,
+  type PagerMove,
+  type PagerState,
+} from "./pager.ts";
+import {
   describeCall,
   emptyLedger,
   goalBadge,
   renderAssistant,
-  renderDiffSummary,
   renderError,
   renderFileList,
   renderGoalCard,
@@ -112,6 +119,13 @@ export interface TerminalUIOptions {
   output?: { write(chunk: string): void };
   /** Injectable workspace listing for `@` completion; defaults to a real walk. */
   listFiles?: () => Promise<string[]>;
+  /** Injectable working-tree diff for `/diff`; defaults to a real `git diff`. */
+  workingDiff?: () => Promise<string>;
+  /**
+   * Whether this session may take the alternate screen. Defaults to the real
+   * tty check, so a piped session prints the patch instead of paging it.
+   */
+  fullScreen?: () => boolean;
   models?: ModelController;
   usage?: UsageController;
   goal?: GoalController;
@@ -168,6 +182,10 @@ export class TerminalUI implements ApprovalHandler {
   readonly #toolUsage = new Map<ToolName, ToolUsage>();
   #queued: string[] = [];
   #select: PendingSelect | null = null;
+  /** Set only while the full-screen pager owns the alternate screen. */
+  #pager: PagerState | null = null;
+  /** Transcript produced while the pager is open, replayed when it closes. */
+  #deferredWrites: string[] = [];
   /** "ask" stops at every command; "auto" runs them inside the sandbox. */
   #approvalMode: "ask" | "auto" = "ask";
   #mode: RunMode = "work";
@@ -195,6 +213,10 @@ export class TerminalUI implements ApprovalHandler {
   readonly #onData = (data: Buffer | string) => this.#feedTerminalKeys(data);
   readonly #onResize = () => {
     this.#lastFrame = "";
+    if (this.#pager) {
+      this.#renderPager();
+      return;
+    }
     this.#renderLive();
   };
   readonly #onExit = () => this.#restore();
@@ -547,6 +569,10 @@ export class TerminalUI implements ApprovalHandler {
   // ------------------------------------------------------------------ keys
 
   #handleKey(key: Key): void {
+    if (this.#pager) {
+      this.#handlePagerKey(key);
+      return;
+    }
     if (this.#select) {
       this.#handleSelectKey(key);
       return;
@@ -671,6 +697,127 @@ export class TerminalUI implements ApprovalHandler {
         break;
     }
     this.#renderLive();
+  }
+
+  // ----------------------------------------------------------------- pager
+
+  /**
+   * `/diff` reads the working tree at the moment it is asked, not the patch
+   * the last turn happened to report. Those differ whenever the user edits a
+   * file themselves, or asks before Sun has run anything at all — and the
+   * question "what has changed here" is about the tree, not about the turn.
+   */
+  async #diffCommand(): Promise<void> {
+    const read = this.#options.workingDiff;
+    let patch = this.#diffPatch;
+    if (read) {
+      try {
+        patch = await read();
+      } catch (error) {
+        // Reporting a clean tree here would be a lie: Git could not read the
+        // workspace at all. Show why, rather than an empty pager.
+        this.#write(
+          renderNote(
+            `Could not read the working tree: ${(error as Error).message}`,
+            this.#width(),
+          ),
+        );
+        return;
+      }
+    }
+    this.#openPager("diff", patch);
+  }
+
+  /**
+   * Take the alternate screen. The live region is erased first so the pager
+   * does not inherit a half-drawn composer, and the transcript underneath is
+   * restored untouched when the pager closes.
+   */
+  #openPager(title: string, content: string): void {
+    const canPage =
+      this.#options.fullScreen?.() ?? Boolean(process.stdin.isTTY);
+    if (!this.#active || !canPage) {
+      this.#write(renderPatch(content, this.#width()));
+      return;
+    }
+    this.#clearLive();
+    const width = this.#screenWidth();
+    this.#pager = {
+      title,
+      source: content,
+      rows: wrapPatch(content, width),
+      wrappedWidth: width,
+      offset: 0,
+    };
+    this.#out.write(control.enterAlternate + control.hideCursor);
+    this.#renderPager();
+  }
+
+  #closePager(): void {
+    if (!this.#pager) return;
+    this.#pager = null;
+    this.#out.write(control.exitAlternate + control.showCursor);
+    this.#lastFrame = "";
+    this.#liveRows = 0;
+    this.#cursorRow = 0;
+    const deferred = this.#deferredWrites;
+    this.#deferredWrites = [];
+    // #write redraws the live region itself, so only an empty flush needs it.
+    if (deferred.length) this.#write(deferred);
+    else this.#renderLive(true);
+  }
+
+  #handlePagerKey(key: Key): void {
+    const pager = this.#pager;
+    if (!pager) return;
+    const moves: Partial<Record<Key["name"], PagerMove>> = {
+      up: "up",
+      down: "down",
+      "page-up": "page-up",
+      "page-down": "page-down",
+      home: "home",
+      end: "end",
+    };
+    // `j`/`k` ride alongside the arrows, exactly as Codex leaves them: the
+    // jump and half-page motions a vim user would reach for next are not bound.
+    const move =
+      moves[key.name] ??
+      (key.name === "char"
+        ? key.text === "j"
+          ? "down"
+          : key.text === "k"
+            ? "up"
+            : undefined
+        : undefined);
+    if (move) {
+      pager.offset = pagerScroll(pager, move, this.#rows());
+      this.#renderPager();
+      return;
+    }
+    if (key.name === "escape" || (key.name === "char" && key.text === "q")) {
+      this.#closePager();
+      return;
+    }
+    if (key.name === "interrupt") {
+      this.#closePager();
+      this.#interrupt();
+    }
+  }
+
+  #renderPager(): void {
+    const pager = this.#pager;
+    if (!pager) return;
+    const width = this.#screenWidth();
+    // A resize changes where every long line breaks, so the body is rebuilt
+    // rather than reflowed, and the offset is re-clamped by the renderer.
+    refitPager(pager, width);
+    // Each row is placed absolutely. Joining with newlines would leave a row
+    // that exactly fills the width in the terminal's pending-wrap state, and
+    // the frame would drift down the screen by a line on every keystroke.
+    const frame = renderPager(pager, width, this.#rows())
+      .map((line, index) => `\x1b[${index + 1};1H${control.eraseLine}${line}`)
+      .join("");
+    this.#out.write(control.syncStart + frame + control.syncEnd);
   }
 
   // ------------------------------------------------------------ completion
@@ -921,14 +1068,7 @@ export class TerminalUI implements ApprovalHandler {
         break;
       }
       case "diff":
-        this.#write(
-          this.#changedFiles.length
-            ? [
-                ...renderDiffSummary(this.#changedFiles, this.#diffPatch, width),
-                ...renderPatch(this.#diffPatch, width),
-              ]
-            : renderNote("The working tree is unchanged.", width),
-        );
+        await this.#diffCommand();
         break;
       case "files":
         this.#write(renderFileList([...this.#files.values()], width));
@@ -1139,6 +1279,20 @@ export class TerminalUI implements ApprovalHandler {
     return Math.max(12, columns - 1);
   }
 
+  /** Full screen height. The pager owns every row, unlike the live region. */
+  #rows(): number {
+    return Math.max(8, process.stdout.rows ?? 24);
+  }
+
+  /**
+   * The live region stops one column short so a full-width line cannot wrap
+   * under the composer. The pager positions every row absolutely instead, so
+   * it can use the last column the way the reference does.
+   */
+  #screenWidth(): number {
+    return Math.max(12, process.stdout.columns ?? 80);
+  }
+
   #enableInput(): void {
     if (!process.stdin.isTTY) return;
     process.stdin.setRawMode(true);
@@ -1158,11 +1312,27 @@ export class TerminalUI implements ApprovalHandler {
 
   #restore(): void {
     if (process.stdin.isTTY) process.stdin.setRawMode(false);
-    this.#out.write(`\x1b[?2004l${control.showCursor}`);
+    // Exiting mid-pager must hand the normal screen back, or the shell prompt
+    // returns onto the alternate buffer and the session appears to vanish.
+    const alternate = this.#pager ? control.exitAlternate : "";
+    this.#pager = null;
+    this.#out.write(`\x1b[?2004l${alternate}${control.showCursor}`);
+    // Exiting straight out of the pager must not swallow the transcript the
+    // run produced behind it.
+    const deferred = this.#deferredWrites;
+    this.#deferredWrites = [];
+    if (deferred.length) this.#out.write(`${deferred.join("\n")}\n`);
   }
 
   #write(lines: string[]): void {
     if (!this.#active || lines.length === 0) return;
+    // A turn keeps running while the pager is open. The alternate screen is
+    // discarded on exit, so anything written onto it would be lost from the
+    // transcript entirely — hold it until the real screen is back.
+    if (this.#pager) {
+      this.#deferredWrites.push(...lines);
+      return;
+    }
     this.#clearLive();
     this.#out.write(`${lines.join("\n")}\n`);
     this.#renderLive(true);
@@ -1185,6 +1355,9 @@ export class TerminalUI implements ApprovalHandler {
 
   #renderLive(force = false): void {
     if (!this.#active) return;
+    // The pager owns the whole screen; a composer drawn over it would land on
+    // the alternate buffer and survive as garbage once the pager closes.
+    if (this.#pager) return;
     const frame = renderFooter(this.#view(), this.#width());
     const maxRows = Math.max(4, (process.stdout.rows ?? 24) - 1);
     const lines = frame.lines.slice(-maxRows);

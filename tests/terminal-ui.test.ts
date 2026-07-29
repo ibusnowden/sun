@@ -648,3 +648,164 @@ describe("TerminalUI", () => {
     ui.stop();
   });
 });
+
+describe("/diff", () => {
+  function diffHarness(workingDiff?: () => Promise<string>) {
+    const chunks: string[] = [];
+    const ui = new TerminalUI({
+      version: "0.1.0",
+      mode: "work",
+      model: "glm-5.2",
+      repository: "/repo",
+      output: { write: (chunk: string) => void chunks.push(chunk) },
+      ...(workingDiff ? { workingDiff } : {}),
+    });
+    const text = (from = 0): string =>
+      stripAnsi(chunks.slice(from).join(""))
+        .replace(/\r/g, "")
+        .replace(/\x1b\[\?[0-9]+[hl]/g, "");
+    // Assertions scope to what a command emitted, since the transcript above
+    // it already carries the inline preview of the same edit.
+    const mark = (): number => chunks.length;
+    return { ui, text, mark };
+  }
+
+  test("reads the working tree, not the patch the last turn reported", async () => {
+    const { ui, text, mark } = diffHarness(async () =>
+      ["diff --git a/other.ts b/other.ts", "@@ -1 +1 @@", "+edited by hand"].join(
+        "\n",
+      ),
+    );
+    ui.start();
+    ui.handle({ type: "diff", files: ["app.ts"], patch: PATCH });
+    const before = mark();
+    ui.feedKeys("/diff\r");
+    await Bun.sleep(10);
+    ui.stop();
+    expect(text(before)).toContain("edited by hand");
+    expect(text(before)).not.toContain("const ttl = minutes * 60_000");
+  });
+
+  test("an unreadable tree says why instead of claiming it is clean", async () => {
+    const { ui, text } = diffHarness(async () => {
+      throw new Error("not a git repository");
+    });
+    ui.start();
+    ui.feedKeys("/diff\r");
+    await Bun.sleep(10);
+    ui.stop();
+    // Reporting "unchanged" here would be a lie in the one case the user most
+    // needs the truth — a workspace nested inside a larger repository.
+    expect(text()).toContain("Could not read the working tree");
+    expect(text()).toContain("not a git repository");
+    expect(text()).not.toContain("The working tree is unchanged.");
+  });
+
+  test("without a tty the patch is printed rather than paged", async () => {
+    const { ui, text } = diffHarness(async () => PATCH);
+    ui.start();
+    ui.feedKeys("/diff\r");
+    await Bun.sleep(10);
+    ui.stop();
+    // No alternate-screen switch: a piped session must stay in scrollback.
+    expect(text()).toContain("const ttl = minutes * 60_000");
+    expect(text()).not.toContain("q to quit");
+  });
+});
+
+describe("the /diff pager", () => {
+  function pagerHarness(workingDiff = async () => PATCH) {
+    const chunks: string[] = [];
+    const ui = new TerminalUI({
+      version: "0.1.0",
+      mode: "work",
+      model: "glm-5.2",
+      repository: "/repo",
+      output: { write: (chunk: string) => void chunks.push(chunk) },
+      workingDiff,
+      fullScreen: () => true,
+    });
+    const raw = (from = 0): string => chunks.slice(from).join("");
+    const text = (from = 0): string =>
+      stripAnsi(raw(from)).replace(/\r/g, "");
+    return { ui, text, raw, mark: () => chunks.length };
+  }
+
+  async function openPager(ui: TerminalUI) {
+    ui.feedKeys("/diff\r");
+    await Bun.sleep(10);
+  }
+
+  test("takes the alternate screen and gives it back on q", async () => {
+    const { ui, raw, mark } = pagerHarness();
+    ui.start();
+    const before = mark();
+    await openPager(ui);
+    expect(raw(before)).toContain("\x1b[?1049h");
+    expect(raw(before)).not.toContain("\x1b[?1049l");
+
+    const paged = mark();
+    ui.feedKeys("q");
+    expect(raw(paged)).toContain("\x1b[?1049l");
+    ui.stop();
+  });
+
+  test("esc closes it too, and the frame carries the codex chrome", async () => {
+    const { ui, text, raw, mark } = pagerHarness();
+    ui.start();
+    await openPager(ui);
+    const paged = mark();
+    expect(text(paged - 1)).toContain("/ D I F F");
+    expect(text(paged - 1)).toContain("q to quit");
+    // Raw patch headers, which the transcript's inline preview strips.
+    expect(text(paged - 1)).toContain("+++ b/app.ts");
+    expect(text(paged - 1)).toContain("@@ -1 +1 @@");
+
+    ui.feedKeys("\x1b");
+    expect(raw(paged)).toContain("\x1b[?1049l");
+    ui.stop();
+  });
+
+  test("scroll keys move the viewport without leaving the pager", async () => {
+    const body = Array.from({ length: 200 }, (_, i) => ` line ${i}`).join("\n");
+    const { ui, text, mark } = pagerHarness(async () => body);
+    ui.start();
+    await openPager(ui);
+
+    const top = mark();
+    ui.feedKeys("j");
+    expect(text(top)).toContain("q to quit");
+
+    const moved = mark();
+    ui.feedKeys("\x1b[F");
+    expect(text(moved)).toContain("100% ─");
+    ui.stop();
+  });
+
+  test("transcript written behind the pager survives it closing", async () => {
+    const { ui, text, mark } = pagerHarness();
+    ui.start();
+    await openPager(ui);
+
+    // A turn keeps running while the pager is open. The alternate screen is
+    // thrown away on exit, so this must not be written onto it.
+    const paged = mark();
+    ui.note("the run kept going");
+    expect(text(paged)).not.toContain("the run kept going");
+
+    const closing = mark();
+    ui.feedKeys("q");
+    expect(text(closing)).toContain("the run kept going");
+    ui.stop();
+  });
+
+  test("exiting straight from the pager still flushes the transcript", async () => {
+    const { ui, text, mark } = pagerHarness();
+    ui.start();
+    await openPager(ui);
+    ui.note("emitted behind the pager");
+    const before = mark();
+    ui.stop();
+    expect(text(before)).toContain("emitted behind the pager");
+  });
+});

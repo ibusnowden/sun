@@ -285,8 +285,48 @@ pruned past 400 days). The periods are calendar-based — a week begins Monday, 
 month on the 1st — and each line names its start date, so the figure is never
 ambiguous about which window it covers.
 
-The live transcript shows a compact preview after each changed patch; `/diff`
-prints the full cumulative patch. Assistant replies are rendered as Markdown:
+The live transcript shows a compact preview after each changed patch. `/diff`
+is the one command that does not write to the transcript: it takes the
+alternate screen and opens a full-screen pager over the raw working-tree diff,
+untracked files included, read at the moment you ask rather than carried over
+from the last turn.
+
+```text
+/ D I F F / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / / /
+diff --git a/math.js b/math.js
+index 0604766..0bd82db 100644
+--- a/math.js
++++ b/math.js
+@@ -1,3 +1,7 @@
+ export function add(a, b) {
+   return a + b
+ }
++
++export function subtract(a, b) {
++  return a - b
++}
+~
+~
+──────────────────────────────────────────────────────────────────────── 0% ─
+ ↑/↓ to scroll   pgup/pgdn to page   home/end to jump
+ q to quit
+```
+
+`↑`/`↓` and `j`/`k` move a row, `pgup`/`pgdn` a screenful, `home`/`end` jump to
+either end, and `q` or `esc` closes it and puts the transcript back. Rows past
+the end of the patch are marked `~`, and long lines break at the column rather
+than at a word, so the columns being compared stay aligned. Leaving the pager
+restores the scrollback underneath untouched.
+
+Every dimension here — the letter-spaced header, the five rows of chrome, the
+percentage on the rule, the page step, and which keys do nothing — was measured
+off a live `codex-cli` under a pty, and the rendered frame matches it line for
+line. `j`/`k` are bound because Codex binds them; `gg`, `G`, `ctrl+d`, and
+`ctrl+u` are deliberately left unbound for the same reason. The one difference
+is under the surface: Sun paints through its own named palette rather than
+Codex's 256-colour codes, so the colours match but the escape sequences differ.
+
+Assistant replies are rendered as Markdown:
 emphasis, inline code, lists, headings, quotes, tables, and fenced blocks are
 laid out rather than printed with their punctuation. Press `esc` to clear a
 non-empty input, or to interrupt a run and keep the partial transcript.

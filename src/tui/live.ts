@@ -30,6 +30,8 @@ export interface Key {
     | "down"
     | "home"
     | "end"
+    | "page-up"
+    | "page-down"
     | "escape"
     | "tab"
     | "interrupt"
@@ -58,6 +60,8 @@ const SEQUENCES: Record<string, Key["name"]> = {
   "\x1bOF": "end",
   "\x1b[4~": "end",
   "\x1b[3~": "delete",
+  "\x1b[5~": "page-up",
+  "\x1b[6~": "page-down",
 };
 
 /** Stateful raw-input decoder with partial-sequence and bracketed-paste support. */
