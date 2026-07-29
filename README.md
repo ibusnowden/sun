@@ -228,6 +228,23 @@ average, and the peak prompt as a share of the context window. The context line
 reports the peak prompt rather than the total, because only the prompt counts
 against the window and the peak is what a long session actually runs out of.
 
+It also reports **per-tool cost**. The tool registry estimates the tokens each
+result adds to the next prompt and attributes them to the tool that produced
+them, so `By tool` answers "what is eating my context window" — usually a
+`bash` command that printed more than anyone wanted:
+
+```text
+By tool
+  bash  412k from 38 calls · 2 failed · 3 truncated
+  read   54k from 11 calls
+```
+
+Finally it reports **this week and this month**, which outlive the session.
+Spend is bucketed by local calendar day in `.agent/usage.json` (gitignored, and
+pruned past 400 days). The periods are calendar-based — a week begins Monday, a
+month on the 1st — and each line names its start date, so the figure is never
+ambiguous about which window it covers.
+
 The live transcript shows a compact preview after each changed patch; `/diff`
 prints the full cumulative patch. Assistant replies are rendered as Markdown:
 emphasis, inline code, lists, headings, quotes, tables, and fenced blocks are

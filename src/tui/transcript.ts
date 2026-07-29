@@ -3,8 +3,10 @@ import type {
   ToolCall,
   ToolName,
   ToolResult,
+  ToolUsage,
 } from "../core/types.ts";
 import { describeStatus, type Goal } from "../agent/goal.ts";
+import type { PeriodTotal } from "../agent/usage.ts";
 import { SLASH_COMMANDS } from "./completion.ts";
 import { renderMarkdown } from "./markdown.ts";
 import {
@@ -42,6 +44,15 @@ export interface DiffStats {
 }
 
 /** How each tool names itself in the transcript. */
+/**
+ * A shell command is not a file path, and the eye should not have to read the
+ * verb to tell them apart. Commands take the running colour the live footer
+ * already uses for work in flight; paths stay a plain heading.
+ */
+function targetTone(tool: ToolName): (value: string) => string {
+  return tool === "bash" || tool === "publish" ? tone.running : tone.heading;
+}
+
 const TOOL_VERB: Record<ToolName, string> = {
   read: "Read",
   edit: "Edited",
@@ -104,9 +115,13 @@ export function renderToolEnd(
     call.tool === "write" && result.metadata?.existing
       ? "Overwrote"
       : TOOL_VERB[call.tool];
-  const headline = `${verb} ${describeCall(call)}`;
   const stat = toolStat(call, result, durationMs);
-  const lines = commandHeadline(headline, stat, result.ok, width);
+  const lines = commandHeadline(
+    { verb, target: describeCall(call), paint: targetTone(call.tool) },
+    stat,
+    result.ok,
+    width,
+  );
 
   if (!result.ok) {
     // The exit code is already on the headline, so a command only needs to
@@ -149,29 +164,41 @@ export function renderToolEnd(
  * The bullet line for a tool. A long command wraps onto `│` continuations so
  * the whole thing stays readable instead of being clipped to one row.
  */
+/**
+ * `• Ran <command> (exit 0)`.
+ *
+ * The bullet carries the outcome — green for success, red for failure — so a
+ * scrolled-back transcript can be scanned down column 0 alone. The verb stays
+ * a heading and the target takes its own colour, which is what separates a
+ * shell command from a file path at a glance.
+ */
 function commandHeadline(
-  headline: string,
+  head: { verb: string; target: string; paint: (value: string) => string },
   stat: string,
   ok: boolean,
   width: number,
 ): string[] {
+  const headline = head.target ? `${head.verb} ${head.target}` : head.verb;
   const suffix = stat ? ` (${stat})` : "";
   // Continuation rows carry a four-column prefix, so the text is wrapped to
   // fit the deeper of the two indents rather than the shallower one.
   const available = Math.max(4, width - 4 - visibleWidth(suffix));
   const wrapped = wrap(headline, available);
-  const head = wrapped[0] ?? "";
+  const first = wrapped[0] ?? "";
   const rest = wrapped.slice(1);
-  const marker = ok ? tone.muted(glyph.bullet) : tone.failed(glyph.bullet);
+  const marker = ok ? tone.ok(glyph.bullet) : tone.failed(glyph.bullet);
+  // The verb opens the first row; whatever follows it on that row is target.
+  const verb = first.slice(0, head.verb.length);
+  const target = first.slice(head.verb.length);
 
   return [
     truncate(
-      `${marker} ${tone.heading(head)}${rest.length === 0 ? suffix : ""}`,
+      `${marker} ${tone.heading(verb)}${head.paint(target)}${rest.length === 0 ? suffix : ""}`,
       width,
     ),
     ...rest.map((line, index) =>
       truncate(
-        `${BODY}${tone.muted(glyph.continuation)} ${tone.detail(line)}${
+        `${BODY}${tone.muted(glyph.continuation)} ${head.paint(line)}${
           index === rest.length - 1 ? suffix : ""
         }`,
         width,
@@ -642,21 +669,44 @@ export function emptyLedger(): TokenLedger {
  * than the running total, because the window is what a long session actually
  * runs out of, and only the prompt counts against it.
  */
-export function renderTokens(ledger: TokenLedger, width: number): string[] {
-  if (ledger.calls === 0) {
-    return renderNote(
-      "No model calls yet, so there is nothing to count.",
-      width,
-    );
+export interface TokenView {
+  ledger: TokenLedger;
+  /** Per-tool cost for the session, heaviest first. */
+  tools: ToolUsage[];
+  /** Cross-session totals, or null when nothing is persisted. */
+  periods: { week: PeriodTotal; month: PeriodTotal } | null;
+}
+
+export function renderTokens(view: TokenView, width: number): string[] {
+  const { ledger } = view;
+  if (ledger.calls === 0 && view.tools.length === 0) {
+    const periods = view.periods ? periodRows(view.periods) : [];
+    if (periods.length === 0) {
+      return renderNote(
+        "No model calls yet, so there is nothing to count.",
+        width,
+      );
+    }
+    return [
+      "",
+      `${BODY}${tone.heading("Tokens")}`,
+      "",
+      ...renderRows(
+        [["session", "nothing spent yet"], ...periods],
+        width,
+      ),
+      "",
+    ];
   }
 
-  const rows: Array<[string, string]> = [
-    [
+  const rows: Array<[string, string]> = [];
+  if (ledger.calls > 0) {
+    rows.push([
       "session",
       `${formatTokens(ledger.totalTokens)} over ${formatCount(ledger.calls, "model call")}` +
         ` · ${formatTokens(ledger.promptTokens)} in, ${formatTokens(ledger.completionTokens)} out`,
-    ],
-  ];
+    ]);
+  }
 
   if (ledger.last) {
     rows.push([
@@ -664,10 +714,12 @@ export function renderTokens(ledger: TokenLedger, width: number): string[] {
       `${formatTokens(ledger.last.totalTokens)} · ${formatTokens(ledger.last.promptTokens)} in, ${formatTokens(ledger.last.completionTokens)} out`,
     ]);
   }
-  rows.push([
-    "average",
-    `${formatTokens(Math.round(ledger.totalTokens / ledger.calls))} per call`,
-  ]);
+  if (ledger.calls > 0) {
+    rows.push([
+      "average",
+      `${formatTokens(Math.round(ledger.totalTokens / ledger.calls))} per call`,
+    ]);
+  }
 
   if (ledger.contextTokens > 0) {
     const share = Math.min(
@@ -680,13 +732,62 @@ export function renderTokens(ledger: TokenLedger, width: number): string[] {
     ]);
   }
 
-  return [
+  rows.push(...periodRows(view.periods));
+
+  const lines = [
     "",
     `${BODY}${tone.heading("Tokens")}`,
     "",
     ...renderRows(rows, width),
-    "",
   ];
+
+  if (view.tools.length > 0) {
+    // Tool output is fed straight back into the next prompt, so this is where
+    // a context window actually goes.
+    lines.push(
+      "",
+      `${BODY}${tone.heading("By tool")}`,
+      "",
+      ...renderRows(
+        view.tools.map((tool): [string, string] => [
+          tool.tool,
+          describeToolUsage(tool),
+        ]),
+        width,
+      ),
+    );
+  }
+
+  lines.push("");
+  return lines;
+}
+
+function periodRows(
+  periods: { week: PeriodTotal; month: PeriodTotal } | null,
+): Array<[string, string]> {
+  if (!periods) return [];
+  const rows: Array<[string, string]> = [];
+  for (const [label, period] of [
+    ["this week", periods.week],
+    ["this month", periods.month],
+  ] as const) {
+    if (period.calls === 0) continue;
+    rows.push([
+      label,
+      `${formatTokens(period.totalTokens)} over ${formatCount(period.activeDays, "day")}` +
+        ` · ${formatCount(period.calls, "call")} since ${period.since}`,
+    ]);
+  }
+  return rows;
+}
+
+function describeToolUsage(tool: ToolUsage): string {
+  const parts = [
+    `${formatTokens(tool.outputTokens)} from ${formatCount(tool.calls, "call")}`,
+  ];
+  if (tool.failures > 0) parts.push(`${tool.failures} failed`);
+  if (tool.truncated > 0) parts.push(`${tool.truncated} truncated`);
+  return parts.join(" · ");
 }
 
 export function renderHelp(width: number): string[] {

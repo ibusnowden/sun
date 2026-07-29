@@ -13,6 +13,14 @@ import {
   type Goal,
 } from "./agent/goal.ts";
 import { executePlanPrompt, planPrompt } from "./agent/plan.ts";
+import {
+  emptyHistory,
+  loadHistory,
+  recordUsage,
+  saveHistory,
+  summarize,
+  type UsageHistory,
+} from "./agent/usage.ts";
 import { initializeRepository, loadConfig } from "./config.ts";
 import type {
   AgentEvent,
@@ -32,6 +40,7 @@ import {
   TerminalUI,
   type GoalController,
   type ModelController,
+  type UsageController,
 } from "./tui/terminal-ui.ts";
 import { sanitizeTerminalText } from "./tui/theme.ts";
 
@@ -121,6 +130,7 @@ async function runSession(
     repository: config.repository,
     models: session.models(),
     goal: session.goals(),
+    usage: session.usageController(),
   });
   ui.start();
 
@@ -193,12 +203,14 @@ async function runSession(
         interrupted: signal.aborted,
       });
       if (settled) ui.showGoal(settled);
+      await session.flushUsage();
       // A goal that is still active drives the next iteration without waiting
       // for the user, which is the whole point of setting one.
       if (!pendingTurn && session.shouldContinueGoal()) pending = "";
     }
   } finally {
     ui.stop();
+    await session.flushUsage();
   }
   if (lastState === "blocked") process.exitCode = 2;
 }
@@ -218,6 +230,8 @@ class SessionState {
   #goal: Goal | null = null;
   #model: string;
   #provider: ModelProvider | null = null;
+  #usage: UsageHistory = emptyHistory();
+  #usageDirty = false;
 
   constructor(readonly config: SunConfig) {
     this.#model = config.model;
@@ -225,6 +239,28 @@ class SessionState {
 
   async load(): Promise<void> {
     this.#goal = await loadGoal(this.config.agentDirectory);
+    this.#usage = await loadHistory(this.config.agentDirectory);
+  }
+
+  /**
+   * Recording is synchronous so the UI never waits on a disk write; the
+   * session loop flushes after each turn, and again on the way out.
+   */
+  usageController(): UsageController {
+    return {
+      record: (usage) => {
+        this.#usage = recordUsage(this.#usage, usage);
+        this.#usageDirty = true;
+      },
+      summary: () => summarize(this.#usage),
+    };
+  }
+
+  async flushUsage(): Promise<void> {
+    if (!this.#usageDirty) return;
+    this.#usageDirty = false;
+    // Losing a token count must never take a session down.
+    await saveHistory(this.config.agentDirectory, this.#usage).catch(() => {});
   }
 
   async provider(observer: ProviderObserver): Promise<ModelProvider> {

@@ -7,7 +7,9 @@ import type {
   ToolCall,
   ToolName,
   ToolResult,
+  ToolUsage,
 } from "../core/types.ts";
+import { estimateTokens } from "../model/context-budget.ts";
 import { PLAN_BLOCKED_TOOLS, planRefusal } from "../agent/plan.ts";
 import { runProcess } from "../core/process.ts";
 import { PathGuard } from "./path-guard.ts";
@@ -47,6 +49,7 @@ const schemas = {
 
 export class ToolRegistry {
   readonly #guard: PathGuard;
+  readonly #usage = new Map<ToolName, ToolUsage>();
 
   private constructor(
     readonly config: SunConfig,
@@ -78,7 +81,42 @@ export class ToolRegistry {
     );
   }
 
+  /**
+   * What each tool has cost this registry, heaviest first. Tool output is fed
+   * straight back into the next prompt, so this is the honest answer to "what
+   * is eating my context window".
+   */
+  usage(): ToolUsage[] {
+    return [...this.#usage.values()].sort(
+      (left, right) => right.outputTokens - left.outputTokens,
+    );
+  }
+
+  /** Measures one result and folds it into the per-tool ledger. */
+  #record(tool: ToolName, result: ToolResult): ToolResult {
+    const outputTokens = estimateTokens(result.output);
+    const entry = this.#usage.get(tool) ?? {
+      tool,
+      calls: 0,
+      failures: 0,
+      truncated: 0,
+      outputTokens: 0,
+    };
+    this.#usage.set(tool, {
+      tool,
+      calls: entry.calls + 1,
+      failures: entry.failures + (result.ok ? 0 : 1),
+      truncated: entry.truncated + (result.truncated ? 1 : 0),
+      outputTokens: entry.outputTokens + outputTokens,
+    });
+    return { ...result, outputTokens };
+  }
+
   async execute(call: ToolCall): Promise<ToolResult> {
+    return this.#record(call.tool, await this.#dispatch(call));
+  }
+
+  async #dispatch(call: ToolCall): Promise<ToolResult> {
     if (this.blockedByMode(call.tool)) {
       return { ok: false, summary: planRefusal(call.tool), output: "" };
     }
@@ -120,9 +158,16 @@ export class ToolRegistry {
   /** Runs the approved plan outside the sandbox. Call only after approval. */
   async publish(plan: PublishPlan): Promise<ToolResult> {
     if (this.blockedByMode("publish")) {
-      return { ok: false, summary: planRefusal("publish"), output: "" };
+      return this.#record("publish", {
+        ok: false,
+        summary: planRefusal("publish"),
+        output: "",
+      });
     }
-    return await executePublish(plan, this.config.maxOutputBytes);
+    return this.#record(
+      "publish",
+      await executePublish(plan, this.config.maxOutputBytes),
+    );
   }
 
   async #read(input: z.infer<typeof schemas.read>): Promise<ToolResult> {

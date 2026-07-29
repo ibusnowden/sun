@@ -11,7 +11,10 @@ import type {
   RuntimeEvent,
   ToolCall,
   ToolName,
+  ToolResult,
+  ToolUsage,
 } from "../core/types.ts";
+import type { PeriodTotal } from "../agent/usage.ts";
 import { listWorkspaceFiles } from "../repository/inspect.ts";
 import { renderHeader, renderRule } from "./chrome.ts";
 import { control, cursorToColumn, cursorUp } from "./theme.ts";
@@ -72,6 +75,12 @@ const TIPS = [
   "Type @ to complete a workspace path, / for a command.",
 ] as const;
 
+/** Token spend that outlives the session, owned by the session loop. */
+export interface UsageController {
+  record(usage: ModelUsage): void;
+  summary(): { week: PeriodTotal; month: PeriodTotal };
+}
+
 /** Read a model list and switch the session onto one. */
 export interface ModelController {
   current(): string;
@@ -98,6 +107,7 @@ export interface TerminalUIOptions {
   /** Injectable workspace listing for `@` completion; defaults to a real walk. */
   listFiles?: () => Promise<string[]>;
   models?: ModelController;
+  usage?: UsageController;
   goal?: GoalController;
 }
 
@@ -148,6 +158,8 @@ export class TerminalUI implements ApprovalHandler {
   #suppressNextInlineDiff = false;
   #totalTokens = 0;
   #ledger: TokenLedger = emptyLedger();
+  /** Per-tool cost across the whole session; the registry is per-turn. */
+  readonly #toolUsage = new Map<ToolName, ToolUsage>();
   #queued: string[] = [];
   #select: PendingSelect | null = null;
   /** "ask" stops at every command; "auto" runs them inside the sandbox. */
@@ -438,6 +450,7 @@ export class TerminalUI implements ApprovalHandler {
         this.#write(renderNarration(event.call.rationale, width));
         break;
       case "tool_end": {
+        this.#recordTool(event.call.tool, event.result);
         // One blank row closes the whole block, so an edit reads as a headline
         // with its diff attached rather than two separate events.
         this.#write([
@@ -480,6 +493,7 @@ export class TerminalUI implements ApprovalHandler {
 
   #recordUsage(usage: ModelUsage | null): void {
     if (!usage) return;
+    this.#options.usage?.record(usage);
     this.#totalTokens += usage.totalTokens;
     this.#ledger = {
       calls: this.#ledger.calls + 1,
@@ -495,6 +509,27 @@ export class TerminalUI implements ApprovalHandler {
       // real number rather than overwriting it with a non-answer.
       contextTokens: usage.contextTokens || this.#ledger.contextTokens,
     };
+  }
+
+  /**
+   * The registry measures each result; a registry lives for one turn, so the
+   * session-wide view is accumulated from the stamped figure here.
+   */
+  #recordTool(tool: ToolName, result: ToolResult): void {
+    const entry = this.#toolUsage.get(tool) ?? {
+      tool,
+      calls: 0,
+      failures: 0,
+      truncated: 0,
+      outputTokens: 0,
+    };
+    this.#toolUsage.set(tool, {
+      tool,
+      calls: entry.calls + 1,
+      failures: entry.failures + (result.ok ? 0 : 1),
+      truncated: entry.truncated + (result.truncated ? 1 : 0),
+      outputTokens: entry.outputTokens + (result.outputTokens ?? 0),
+    });
   }
 
   #trackFile(call: ToolCall, status: FileActivity["status"]): void {
@@ -843,7 +878,18 @@ export class TerminalUI implements ApprovalHandler {
         break;
       case "tokens":
       case "usage":
-        this.#write(renderTokens(this.#ledger, width));
+        this.#write(
+          renderTokens(
+            {
+              ledger: this.#ledger,
+              tools: [...this.#toolUsage.values()].sort(
+                (left, right) => right.outputTokens - left.outputTokens,
+              ),
+              periods: this.#options.usage?.summary() ?? null,
+            },
+            width,
+          ),
+        );
         break;
       case "diff":
         this.#write(

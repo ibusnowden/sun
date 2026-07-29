@@ -130,6 +130,54 @@ describe("ToolRegistry", () => {
   });
 });
 
+describe("per-tool token accounting", () => {
+  test("stamps every result and attributes cost to the tool that produced it", async () => {
+    const { root, registry } = await setup();
+    await writeFile(join(root, "big.txt"), "x".repeat(3_000));
+
+    const read = await registry.execute(call("read", { path: "big.txt" }));
+    expect(read.ok).toBeTrue();
+    // The estimator is characters over a fixed divisor, so a 3,000-character
+    // file must land in the same order of magnitude, not at zero.
+    expect(read.outputTokens).toBeGreaterThan(500);
+
+    const quiet = await registry.execute(
+      call("bash", { command: "printf hi" }),
+    );
+    expect(quiet.outputTokens).toBeLessThan(read.outputTokens ?? 0);
+
+    const usage = registry.usage();
+    // Heaviest first, so the tool eating the context window leads.
+    expect(usage[0]?.tool).toBe("read");
+    expect(usage.map((entry) => entry.tool).sort()).toEqual(["bash", "read"]);
+    const readUsage = usage.find((entry) => entry.tool === "read");
+    expect(readUsage).toMatchObject({ calls: 1, failures: 0, truncated: 0 });
+    expect(readUsage?.outputTokens).toBe(read.outputTokens ?? 0);
+  });
+
+  test("counts failures and repeated calls against the same tool", async () => {
+    const { registry } = await setup();
+    await registry.execute(call("bash", { command: "true" }));
+    await registry.execute(call("bash", { command: "exit 3" }));
+    await registry.execute(call("read", { path: "does-not-exist.txt" }));
+
+    const bash = registry.usage().find((entry) => entry.tool === "bash");
+    expect(bash).toMatchObject({ tool: "bash", calls: 2, failures: 1 });
+    const read = registry.usage().find((entry) => entry.tool === "read");
+    expect(read).toMatchObject({ tool: "read", calls: 1, failures: 1 });
+  });
+
+  test("records output that came back clipped", async () => {
+    const { registry } = await setup();
+    // maxOutputBytes is 20_000 in the test config.
+    const result = await registry.execute(
+      call("bash", { command: "head -c 60000 /dev/zero | tr '\\0' 'a'" }),
+    );
+    expect(result.truncated).toBeTrue();
+    expect(registry.usage()[0]).toMatchObject({ tool: "bash", truncated: 1 });
+  });
+});
+
 function call(tool: ToolCall["tool"], input: Record<string, unknown>): ToolCall {
   return { tool, input, rationale: "test" };
 }

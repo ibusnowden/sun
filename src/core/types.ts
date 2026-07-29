@@ -40,6 +40,21 @@ export interface ToolResult {
   exitCode?: number;
   truncated?: boolean;
   metadata?: Record<string, unknown>;
+  /**
+   * Estimated tokens this result adds to the next prompt. Stamped by the tool
+   * registry, which is the only place that sees the output before the model.
+   */
+  outputTokens?: number;
+}
+
+/** What one tool has cost, accumulated by the registry. */
+export interface ToolUsage {
+  tool: ToolName;
+  calls: number;
+  failures: number;
+  /** Results that came back clipped, and so cost less than they could have. */
+  truncated: number;
+  outputTokens: number;
 }
 
 export interface RepositoryObservation {

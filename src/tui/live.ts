@@ -460,6 +460,7 @@ const ACTIVE_VERB: Record<string, string> = {
   edit: "Editing",
   write: "Writing",
   bash: "Running",
+  publish: "Publishing",
 };
 
 interface Box {

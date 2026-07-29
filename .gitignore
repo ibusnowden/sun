@@ -10,6 +10,7 @@ dist/
 .agent/state.db
 .agent/state.db-shm
 .agent/state.db-wal
+.agent/usage.json
 .agent/sessions/
 .agent/memory/pending-lessons.jsonl
 .agent/memory/profile.yaml

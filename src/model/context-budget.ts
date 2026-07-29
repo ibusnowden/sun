@@ -83,6 +83,11 @@ function compactString(value: string, maxLength: number): string {
   return `${value.slice(0, half)}\n[${value.length - half * 2} CHARACTERS OMITTED]\n${value.slice(-half)}`;
 }
 
-function estimateTokens(value: string): number {
+/**
+ * Characters over a fixed divisor. Deliberately crude: it is used to budget
+ * context and to attribute cost between tools, where the ratio between callers
+ * matters and an exact count would need the model's own tokenizer.
+ */
+export function estimateTokens(value: string): number {
   return Math.ceil(value.length / CHARS_PER_TOKEN);
 }

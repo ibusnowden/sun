@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { RunResult, ToolCall } from "../src/core/types.ts";
-import { stripAnsi } from "../src/tui/theme.ts";
+import { setColorEnabled, stripAnsi } from "../src/tui/theme.ts";
 import { TerminalUI } from "../src/tui/terminal-ui.ts";
 
 function harness() {
@@ -547,6 +547,88 @@ describe("TerminalUI", () => {
     ui.start();
     ui.feedKeys("/tokens\r");
     expect(text()).toContain("No model calls yet");
+    ui.stop();
+  });
+
+  test("a finished command takes a green bullet and a coloured command", () => {
+    // The suite runs without a TTY, so colour is off by default.
+    setColorEnabled(true);
+    const { ui, chunks } = harness();
+    ui.start();
+    ui.beginRun("run the tests");
+    const call: ToolCall = {
+      tool: "bash",
+      rationale: "Running the focused checks.",
+      input: { command: "bun test" },
+    };
+    ui.handle({ type: "tool_start", call });
+    ui.handle({
+      type: "tool_end",
+      call,
+      result: { ok: true, summary: "exit 0", output: "209 pass", exitCode: 0 },
+    });
+    const raw = chunks.join("");
+    // Green bullet, then the command in the running colour rather than plain.
+    expect(raw).toContain("\x1b[32m•\x1b[0m");
+    expect(raw).toContain("\x1b[36m bun test\x1b[0m");
+
+    ui.handle({ type: "tool_start", call });
+    ui.handle({
+      type: "tool_end",
+      call,
+      result: { ok: false, summary: "exit 1", output: "1 fail", exitCode: 1 },
+    });
+    // A failure keeps the red bullet it always had.
+    expect(chunks.join("")).toContain("\x1b[31m•\x1b[0m");
+    ui.stop();
+    setColorEnabled(false);
+  });
+
+  test("a file path stays a heading rather than taking the command colour", () => {
+    setColorEnabled(true);
+    const { ui, chunks } = harness();
+    ui.start();
+    const call: ToolCall = {
+      tool: "read",
+      rationale: "Reading it.",
+      input: { path: "src/app.ts" },
+    };
+    ui.beginRun("read it");
+    ui.handle({
+      type: "tool_end",
+      call,
+      result: { ok: true, summary: "Read 12 line(s) from src/app.ts", output: "" },
+    });
+    const raw = chunks.join("");
+    expect(raw).toContain("\x1b[32m•\x1b[0m");
+    expect(raw).not.toContain("\x1b[36m src/app.ts");
+    ui.stop();
+    setColorEnabled(false);
+  });
+
+  test("/tokens attributes cost to the tool that produced the output", () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.beginRun("do the work");
+    for (const [tool, tokens] of [
+      ["bash", 9_000],
+      ["read", 3_000],
+      ["bash", 1_000],
+    ] as const) {
+      ui.handle({
+        type: "tool_end",
+        call: { tool, rationale: "r", input: {} },
+        result: { ok: true, summary: "ok", output: "", outputTokens: tokens },
+      });
+    }
+
+    ui.feedKeys("/tokens\r");
+    const shown = text();
+    expect(shown).toContain("By tool");
+    // Heaviest first: bash's two calls outweigh read's one.
+    expect(shown.indexOf("bash")).toBeLessThan(shown.indexOf("read"));
+    expect(shown).toContain("10k from 2 calls");
+    expect(shown).toContain("3k from 1 call");
     ui.stop();
   });
 
