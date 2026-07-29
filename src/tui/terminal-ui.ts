@@ -148,6 +148,7 @@ export class TerminalUI implements ApprovalHandler {
   #select: PendingSelect | null = null;
   /** "ask" stops at every command; "auto" runs them inside the sandbox. */
   #approvalMode: "ask" | "auto" = "ask";
+  #mode: RunMode = "work";
   readonly #alwaysApproved = new Set<string>();
   #taskResolve: ((task: string | null) => void) | null = null;
   #pendingTask: string | null = null;
@@ -179,10 +180,16 @@ export class TerminalUI implements ApprovalHandler {
   constructor(options: TerminalUIOptions) {
     this.#options = options;
     this.#out = options.output ?? process.stdout;
+    this.#mode = options.mode;
   }
 
   get exitRequested(): boolean {
     return this.#exitRequested;
+  }
+
+  /** The mode the next turn runs in. */
+  get mode(): RunMode {
+    return this.#mode;
   }
 
   /** Cumulative session tokens, so the session loop can bill a goal turn. */
@@ -354,28 +361,50 @@ export class TerminalUI implements ApprovalHandler {
   async confirm(request: ApprovalRequest): Promise<boolean> {
     if (!this.#active) return false;
     const scope = approvalScope(request);
-    if (this.#approvalMode === "auto" || this.#alwaysApproved.has(scope)) {
+    // An `alwaysAsk` request leaves the sandbox, so neither auto mode nor a
+    // remembered answer may stand in for the user.
+    if (
+      !request.alwaysAsk &&
+      (this.#approvalMode === "auto" || this.#alwaysApproved.has(scope))
+    ) {
       this.#toolStartedAt = Date.now();
       return true;
     }
     const command = request.command ?? request.action.replace(/^[^:]+:\s*/, "");
+    const choices: ReadonlyArray<{
+      label: string;
+      id: "yes" | "always" | "steer";
+    }> = [
+      { label: request.alwaysAsk ? "Yes, publish it" : "Yes, run it", id: "yes" },
+      ...(request.alwaysAsk
+        ? []
+        : ([
+            {
+              label: `Yes, and stop asking about ${scope} this session`,
+              id: "always",
+            },
+          ] as const)),
+      { label: "No, and let me steer instead", id: "steer" },
+    ];
     const choice = await this.#choose({
-      title: "Allow Sun to run this command?",
+      title: request.alwaysAsk
+        ? "Allow Sun to publish outside the sandbox?"
+        : "Allow Sun to run this command?",
       subtitle: command,
-      options: [
-        { label: "Yes, run it" },
-        { label: `Yes, and stop asking about ${scope} this session` },
-        { label: "No, and let me steer instead" },
-      ],
-      hint: "Press enter to confirm, esc to skip the command",
+      ...(request.detail ? { detail: request.detail } : {}),
+      options: choices.map(({ label }) => ({ label })),
+      hint: request.alwaysAsk
+        ? "Press enter to confirm, esc to cancel. Sun asks every time."
+        : "Press enter to confirm, esc to skip the command",
     });
-    if (choice === 1) this.#alwaysApproved.add(scope);
-    if (choice === 2) {
+    const picked = choice === null ? null : choices[choice]?.id;
+    if (picked === "always") this.#alwaysApproved.add(scope);
+    if (picked === "steer") {
       this.#editor.set(`Use this instead of \`${command}\`: `);
     }
     // Approval wait is human time, not command runtime.
     this.#toolStartedAt = Date.now();
-    return choice === 0 || choice === 1;
+    return picked === "yes" || picked === "always";
   }
 
   // ---------------------------------------------------------------- events
@@ -791,6 +820,9 @@ export class TerminalUI implements ApprovalHandler {
       case "approvals":
         await this.#approvalsCommand();
         break;
+      case "plan":
+        this.#planCommand();
+        break;
       case "diff":
         this.#write(
           this.#changedFiles.length
@@ -916,6 +948,48 @@ export class TerminalUI implements ApprovalHandler {
     if (!picked || picked === current) return;
     await models.select(picked);
     this.#write(renderNote(`Model set to ${picked}.`, width));
+  }
+
+  #planCommand(): void {
+    this.#mode = this.#mode === "plan" ? "work" : "plan";
+    this.#write(
+      renderNote(
+        this.#mode === "plan"
+          ? "Plan mode. Sun investigates and proposes; edits, writes, and publishing are refused until you approve a plan."
+          : "Work mode. Sun can change the workspace again.",
+        this.#width(),
+      ),
+    );
+  }
+
+  /** Offered after a plan-mode turn so the user can hand the plan back. */
+  async confirmPlan(): Promise<"run" | "revise" | "keep"> {
+    const choice = await this.#choose({
+      title: "Run this plan?",
+      subtitle:
+        "Approving switches Sun to work mode and carries out the plan above.",
+      options: [
+        { label: "Yes, carry it out" },
+        {
+          label: "No, revise the plan",
+          description: "Stay in plan mode and tell Sun what to change",
+        },
+        {
+          label: "No, keep planning on my own",
+          description: "Stay in plan mode and leave the plan unrun",
+        },
+      ],
+      hint: "Press enter to confirm, esc to keep planning",
+    });
+    if (choice === 0) {
+      this.#mode = "work";
+      return "run";
+    }
+    if (choice === 1) {
+      this.#editor.set("Revise the plan: ");
+      return "revise";
+    }
+    return "keep";
   }
 
   async #approvalsCommand(): Promise<void> {
@@ -1050,7 +1124,7 @@ export class TerminalUI implements ApprovalHandler {
         : 0,
       totalTokens: this.#totalTokens,
       model: this.#currentModel(),
-      mode: this.#options.mode,
+      mode: this.#mode,
       repository: this.#options.repository,
       input: this.#editor.value,
       cursor: this.#editor.cursor,

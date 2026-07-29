@@ -1,3 +1,4 @@
+import type { RunMode } from "../core/types.ts";
 import {
   formatTokens,
   glyph,
@@ -144,6 +145,8 @@ export interface FooterStatus {
   totalTokens: number;
   /** Right-hand goal badge, already formatted. */
   goal?: string;
+  /** Only "plan" shows a badge; "work" is the unmarked default. */
+  mode?: RunMode;
 }
 
 /**
@@ -162,12 +165,22 @@ export function renderStatus(status: FooterStatus, width: number): string[] {
   const right = visibleWidth(badge) + 24 <= width ? badge : "";
   const available = Math.max(4, width - 2 - (right ? visibleWidth(right) + 2 : 0));
 
+  // Plan mode changes what Sun is allowed to do, so it is the one piece of
+  // state the footer states outright instead of dimming.
+  const modeBadge = status.mode === "plan" ? "PLAN" : "";
+  const budget = Math.max(
+    1,
+    available - (modeBadge ? visibleWidth(modeBadge) + 3 : 0),
+  );
   const prefix = `${status.model} · `;
   const path = truncate(
     status.repository,
-    Math.max(1, available - visibleWidth(prefix)),
+    Math.max(1, budget - visibleWidth(prefix)),
   );
-  const left = `  ${tone.muted(truncate(`${prefix}${path}`, available))}`;
+  const body = truncate(`${prefix}${path}`, budget);
+  const left = modeBadge
+    ? `  ${tone.warn(modeBadge)} ${tone.muted(`· ${body}`)}`
+    : `  ${tone.muted(body)}`;
 
   if (!right) return [left];
   const gap = width - visibleWidth(left) - visibleWidth(right);

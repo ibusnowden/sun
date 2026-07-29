@@ -12,11 +12,13 @@ import {
   shouldContinue,
   type Goal,
 } from "./agent/goal.ts";
+import { executePlanPrompt, planPrompt } from "./agent/plan.ts";
 import { initializeRepository, loadConfig } from "./config.ts";
 import type {
   AgentEvent,
   ModelProvider,
   ProviderObserver,
+  RunMode,
   RunResult,
   SunConfig,
 } from "./core/types.ts";
@@ -43,6 +45,7 @@ interface Options {
   baseUrl?: string;
   apiKeyEnv?: string;
   plain: boolean;
+  plan: boolean;
   maxToolCalls?: number;
   positionals: string[];
 }
@@ -98,17 +101,22 @@ async function main(rawArgs: string[]): Promise<void> {
     ...(options.maxToolCalls ? { maxToolCalls: options.maxToolCalls } : {}),
   });
 
-  if (interactive) await runSession(config, task);
-  else await runPlain(config, task);
+  const mode: RunMode = options.plan ? "plan" : "work";
+  if (interactive) await runSession(config, task, mode);
+  else await runPlain(config, task, mode);
 }
 
-async function runSession(config: SunConfig, firstTask: string): Promise<void> {
+async function runSession(
+  config: SunConfig,
+  firstTask: string,
+  mode: RunMode,
+): Promise<void> {
   const session = new SessionState(config);
   await session.load();
 
   const ui = new TerminalUI({
     version: VERSION,
-    mode: "work",
+    mode,
     model: config.model,
     repository: config.repository,
     models: session.models(),
@@ -117,25 +125,38 @@ async function runSession(config: SunConfig, firstTask: string): Promise<void> {
   ui.start();
 
   let pending: string | null = firstTask || null;
+  /** An approved plan, queued to run without asking the user to retype it. */
+  let pendingTurn: Turn | null = null;
   let lastState: RunResult["state"] | null = null;
   const history: AgentEvent[] = [];
   try {
     for (;;) {
-      const typed = pending ?? (await ui.readTask());
-      pending = null;
-      if (typed === null || ui.exitRequested) break;
-
-      // An empty task means "a goal is active, keep going". Anything the user
-      // typed is run as itself, goal or no goal.
-      const turn = session.nextTurn(typed);
+      let turn: Turn | null;
+      if (pendingTurn) {
+        turn = pendingTurn;
+        pendingTurn = null;
+      } else {
+        const typed = pending ?? (await ui.readTask());
+        pending = null;
+        if (typed === null || ui.exitRequested) break;
+        // An empty task means "a goal is active, keep going". Anything the
+        // user typed is run as itself, goal or no goal.
+        turn = session.nextTurn(typed);
+      }
       if (!turn) continue;
 
+      // Read once: approving a plan flips the mode, and this turn belongs to
+      // the mode it started in.
+      const mode = ui.mode;
+      const prompt = mode === "plan" ? planPrompt(turn.prompt) : turn.prompt;
+
       const before = ui.totalTokens;
-      const signal = ui.beginRun(turn.prompt, turn.display);
+      const signal = ui.beginRun(prompt, turn.display);
       let result: RunResult | null = null;
       try {
         const agent = await Agent.create({
           config,
+          mode,
           provider: await session.provider(ui.observer),
           approval: ui,
           sink: ui.handle,
@@ -143,7 +164,7 @@ async function runSession(config: SunConfig, firstTask: string): Promise<void> {
           signal,
           history,
         });
-        result = await agent.run(turn.prompt);
+        result = await agent.run(prompt);
         lastState = result.state;
         ui.endRun(result);
       } catch (error) {
@@ -153,6 +174,20 @@ async function runSession(config: SunConfig, firstTask: string): Promise<void> {
       }
       if (ui.exitRequested) break;
 
+      // A finished plan is worth nothing until the user decides on it, so the
+      // handoff happens here rather than being left for them to retype.
+      if (mode === "plan" && result?.state === "complete" && !signal.aborted) {
+        const answer = await ui.confirmPlan();
+        if (ui.exitRequested) break;
+        if (answer === "run") {
+          pendingTurn = {
+            prompt: executePlanPrompt(result.summary),
+            display: "Carrying out the approved plan",
+            goalTurn: false,
+          };
+        }
+      }
+
       const settled = await session.recordTurn(turn, result, {
         tokensUsed: ui.totalTokens - before,
         interrupted: signal.aborted,
@@ -160,7 +195,7 @@ async function runSession(config: SunConfig, firstTask: string): Promise<void> {
       if (settled) ui.showGoal(settled);
       // A goal that is still active drives the next iteration without waiting
       // for the user, which is the whole point of setting one.
-      if (session.shouldContinueGoal()) pending = "";
+      if (!pendingTurn && session.shouldContinueGoal()) pending = "";
     }
   } finally {
     ui.stop();
@@ -287,16 +322,23 @@ class SessionState {
   }
 }
 
-async function runPlain(config: SunConfig, task: string): Promise<void> {
+async function runPlain(
+  config: SunConfig,
+  task: string,
+  mode: RunMode,
+): Promise<void> {
   const ui = new PlainUI();
   const provider = await createModelProvider(config, ui.observer);
   const agent = await Agent.create({
     config,
+    mode,
     provider,
     approval: ui,
     sink: ui.handle,
   });
-  const result = await agent.run(task);
+  // Non-interactive runs have nobody to approve a plan, so a plan-mode run
+  // prints the plan and stops there.
+  const result = await agent.run(mode === "plan" ? planPrompt(task) : task);
   ui.summarize(result);
   if (result.state === "blocked") process.exitCode = 2;
 }
@@ -371,6 +413,7 @@ function parseOptions(args: string[]): Options {
   const options: Options = {
     repository: process.cwd(),
     plain: false,
+    plan: false,
     positionals: [],
   };
   for (let index = 0; index < args.length; index += 1) {
@@ -378,6 +421,8 @@ function parseOptions(args: string[]): Options {
     if (!value) continue;
     if (value === "--plain") {
       options.plain = true;
+    } else if (value === "--plan") {
+      options.plan = true;
     } else if (value === "--repo") {
       options.repository = resolve(requiredValue(args, ++index, value));
     } else if (value.startsWith("--repo=")) {
@@ -431,6 +476,7 @@ Usage:
   sun                         Open the interactive agent
   sun "task"                  Open Sun and run a task
   sun --plain "task"          Run one task without the TUI
+  sun --plan "task"           Start in plan mode: propose, change nothing
   sun init [directory]        Create .agent/config.toml
   sun doctor                  Check the configured model
 
@@ -443,10 +489,11 @@ Options:
   --max-tool-calls <n>        Maximum tools in one turn
 
 Tools:
-  read  edit  write  bash
+  read  edit  write  bash  publish
 
 In a session:
   /goal <objective>           Work toward an objective across turns
+  /plan                       Investigate and propose without changing anything
   /model                      Switch the model for the next turn
   /approvals                  Ask before each command, or run straight through
   /diff  /files  /help        Inspect the run

@@ -1,8 +1,13 @@
 Choose exactly one next action.
 
 Use `read` for a known file, `edit` for an exact replacement, `write` for a
-new file or intentional overwrite, and `bash` for discovery, search, Git, or
-tests. Do not repeat an action whose result is already in `recentEvents`.
+new file or intentional overwrite, and `bash` for discovery, search, local Git,
+or tests. Do not repeat an action whose result is already in `recentEvents`.
+
+Use `publish` to push commits to a remote, which Bash cannot do. Leave
+`remote`, `branch`, and `setUpstream` null to publish the current branch to its
+usual remote; set them only when the user names something different. Commit
+first with Bash, and publish only when the user asked you to push.
 
 The tool call `rationale` is shown directly in the terminal as progress
 narration. Write one short, natural sentence about the immediate work. Use

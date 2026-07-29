@@ -1,8 +1,9 @@
 import type { GoalVerdict } from "../agent/goal.ts";
 
-export type RunMode = "work";
+/** `plan` investigates and proposes; only `work` may change anything. */
+export type RunMode = "work" | "plan";
 export type ProviderKind = "openai" | "openai-compatible";
-export type ToolName = "read" | "edit" | "write" | "bash";
+export type ToolName = "read" | "edit" | "write" | "bash" | "publish";
 
 export interface SunConfig {
   repository: string;
@@ -107,6 +108,16 @@ export interface ApprovalRequest {
   action: string;
   reason: string;
   command?: string;
+  /**
+   * Detail the user must see before deciding, such as the exact commits a
+   * push would publish. Rendered above the choices.
+   */
+  detail?: string[];
+  /**
+   * Set for actions that leave the sandbox. Neither `/approvals` auto mode nor
+   * a remembered "stop asking" answer may stand in for the user here.
+   */
+  alwaysAsk?: boolean;
 }
 
 export interface ApprovalHandler {

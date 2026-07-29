@@ -467,4 +467,54 @@ describe("TerminalUI", () => {
     expect(await ui.readTask()).toBe("");
     ui.stop();
   });
+
+  test("a remembered approval never covers a publish", async () => {
+    const { ui, text } = harness();
+    ui.start();
+    ui.beginRun("ship it");
+
+    // Teach the session to stop asking about bash.
+    const bash = ui.confirm({
+      action: "bash: install the new dependency",
+      reason: "dependency change",
+      command: "bun add zod",
+    });
+    ui.feedKeys("2");
+    expect(await bash).toBeTrue();
+
+    // Publishing leaves the sandbox, so it still opens a card, and the card
+    // offers no way to stop being asked.
+    const publish = ui.confirm({
+      action: "publish: origin/main",
+      reason: "Publishing runs Git outside Sun's sandbox.",
+      command: "git push origin abc123def456:refs/heads/main",
+      detail: ["Remote   origin → git@example.invalid:me/repo.git"],
+      alwaysAsk: true,
+    });
+    const card = text();
+    expect(card).toContain("Allow Sun to publish outside the sandbox?");
+    expect(card).toContain("git@example.invalid:me/repo.git");
+    expect(card).toContain("Sun asks every time");
+    expect(card).not.toContain("stop asking about publish");
+
+    ui.feedKeys("1");
+    expect(await publish).toBeTrue();
+    ui.stop();
+  });
+
+  test("/plan toggles the mode and shows it in the footer", () => {
+    const { ui, text } = harness();
+    ui.start();
+    expect(ui.mode).toBe("work");
+
+    ui.feedKeys("/plan\r");
+    expect(ui.mode).toBe("plan");
+    expect(text()).toContain("Plan mode");
+    expect(text()).toContain("PLAN");
+
+    ui.feedKeys("/plan\r");
+    expect(ui.mode).toBe("work");
+    expect(text()).toContain("Work mode");
+    ui.stop();
+  });
 });

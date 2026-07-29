@@ -46,6 +46,7 @@ const TOOL_VERB: Record<ToolName, string> = {
   edit: "Edited",
   write: "Created",
   bash: "Ran",
+  publish: "Published",
 };
 
 function bullet(text: string, width: number, paint = (v: string) => v): string[] {
@@ -252,6 +253,11 @@ export function describeCall(call: ToolCall): string {
   }
   if (call.tool === "edit" || call.tool === "write") {
     return String(call.input.path ?? "");
+  }
+  if (call.tool === "publish") {
+    const remote = String(call.input.remote ?? "origin");
+    const branch = call.input.branch ? `/${String(call.input.branch)}` : "";
+    return `to ${remote}${branch}`;
   }
   return String(call.input.command ?? "");
 }

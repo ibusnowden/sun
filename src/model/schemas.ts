@@ -40,6 +40,16 @@ const bashCall = z.object({
   }),
 });
 
+const publishCall = z.object({
+  tool: z.literal("publish"),
+  rationale: z.string().min(1),
+  input: z.object({
+    remote: z.string().min(1).nullable(),
+    branch: z.string().min(1).nullable(),
+    setUpstream: z.boolean().nullable(),
+  }),
+});
+
 export const decisionEnvelopeSchema = z.object({
   decision: z.discriminatedUnion("kind", [
     z.object({
@@ -49,6 +59,7 @@ export const decisionEnvelopeSchema = z.object({
         editCall,
         writeCall,
         bashCall,
+        publishCall,
       ]),
     }),
     z.object({

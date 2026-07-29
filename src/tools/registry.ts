@@ -2,13 +2,20 @@ import { readFile, mkdir, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { z } from "zod";
 import type {
+  RunMode,
   SunConfig,
   ToolCall,
   ToolName,
   ToolResult,
 } from "../core/types.ts";
+import { PLAN_BLOCKED_TOOLS, planRefusal } from "../agent/plan.ts";
 import { runProcess } from "../core/process.ts";
 import { PathGuard } from "./path-guard.ts";
+import {
+  executePublish,
+  preparePublish,
+  type PublishPlan,
+} from "./publish.ts";
 
 const schemas = {
   read: z.object({
@@ -31,6 +38,11 @@ const schemas = {
     command: z.string().min(1),
     timeoutMs: z.number().int().positive().optional(),
   }),
+  publish: z.object({
+    remote: z.string().min(1).nullish(),
+    branch: z.string().min(1).nullish(),
+    setUpstream: z.boolean().nullish(),
+  }),
 } satisfies Record<ToolName, z.ZodType>;
 
 export class ToolRegistry {
@@ -38,19 +50,38 @@ export class ToolRegistry {
 
   private constructor(
     readonly config: SunConfig,
+    readonly mode: RunMode,
     guard: PathGuard,
   ) {
     this.#guard = guard;
   }
 
-  static async create(config: SunConfig): Promise<ToolRegistry> {
+  static async create(
+    config: SunConfig,
+    mode: RunMode = "work",
+  ): Promise<ToolRegistry> {
     return new ToolRegistry(
       config,
+      mode,
       await PathGuard.create(config.repository),
     );
   }
 
+  /**
+   * Plan mode's guarantee to the user is that nothing changes, so it is
+   * enforced here rather than left to the prompt.
+   */
+  blockedByMode(tool: ToolName): boolean {
+    return (
+      this.mode === "plan" &&
+      (PLAN_BLOCKED_TOOLS as readonly string[]).includes(tool)
+    );
+  }
+
   async execute(call: ToolCall): Promise<ToolResult> {
+    if (this.blockedByMode(call.tool)) {
+      return { ok: false, summary: planRefusal(call.tool), output: "" };
+    }
     try {
       switch (call.tool) {
         case "read":
@@ -61,6 +92,16 @@ export class ToolRegistry {
           return await this.#write(schemas.write.parse(call.input));
         case "bash":
           return await this.#bash(schemas.bash.parse(call.input));
+        case "publish":
+          // Publishing leaves the sandbox, so it is only reachable through
+          // plan() → user approval → publish(). Reaching it here means a
+          // caller skipped the gate.
+          return {
+            ok: false,
+            summary:
+              "publish must go through the approval path, not execute()",
+            output: "",
+          };
       }
     } catch (error) {
       return {
@@ -69,6 +110,19 @@ export class ToolRegistry {
         output: "",
       };
     }
+  }
+
+  /** Resolves what a publish would send, without touching the network. */
+  async planPublish(input: unknown): Promise<PublishPlan> {
+    return await preparePublish(this.config, schemas.publish.parse(input));
+  }
+
+  /** Runs the approved plan outside the sandbox. Call only after approval. */
+  async publish(plan: PublishPlan): Promise<ToolResult> {
+    if (this.blockedByMode("publish")) {
+      return { ok: false, summary: planRefusal("publish"), output: "" };
+    }
+    return await executePublish(plan, this.config.maxOutputBytes);
   }
 
   async #read(input: z.infer<typeof schemas.read>): Promise<ToolResult> {

@@ -64,10 +64,57 @@ export async function runProcess(
   },
 ): Promise<ProcessResult> {
   const cwd = await realpath(options.cwd);
-  const sandboxedCommand = sandboxCommand(command, cwd);
-  const processHandle = Bun.spawn(sandboxedCommand, {
+  return await spawnBounded(sandboxCommand(command, cwd), {
+    // Bubblewrap performs the --chdir itself.
     cwd: "/",
     env: childEnvironment(options.env),
+    timeoutMs: options.timeoutMs,
+    maxOutputBytes: options.maxOutputBytes,
+  });
+}
+
+/**
+ * Runs a command OUTSIDE the sandbox, with the user's real environment and
+ * credentials. This is the one capability the sandbox exists to withhold, so
+ * it is deliberately not reachable from the `bash` tool: the only caller is
+ * the publish path in `tools/publish.ts`, which builds a fixed `git push`
+ * argv from validated fields and runs only after the user approves the exact
+ * commit being pushed. Never route model-supplied command strings here.
+ */
+export async function runTrustedProcess(
+  command: string[],
+  options: {
+    cwd: string;
+    timeoutMs: number;
+    maxOutputBytes: number;
+  },
+): Promise<ProcessResult> {
+  const cwd = await realpath(options.cwd);
+  return await spawnBounded(command, {
+    cwd,
+    env: {
+      ...process.env,
+      // stdin is closed, so a credential prompt would hang until the timeout
+      // rather than ask anyone. Fail fast with a usable message instead.
+      GIT_TERMINAL_PROMPT: "0",
+    },
+    timeoutMs: options.timeoutMs,
+    maxOutputBytes: options.maxOutputBytes,
+  });
+}
+
+async function spawnBounded(
+  command: string[],
+  options: {
+    cwd: string;
+    env: Record<string, string | undefined>;
+    timeoutMs: number;
+    maxOutputBytes: number;
+  },
+): Promise<ProcessResult> {
+  const processHandle = Bun.spawn(command, {
+    cwd: options.cwd,
+    env: options.env,
     detached: true,
     stdin: "ignore",
     stdout: "pipe",

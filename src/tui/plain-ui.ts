@@ -64,6 +64,9 @@ export class PlainUI implements ApprovalHandler {
     console.log(
       sanitizeTerminalText(`${request.action}\n${request.reason}`),
     );
+    for (const line of request.detail ?? []) {
+      console.log(sanitizeTerminalText(line));
+    }
     if (request.command) {
       console.log(sanitizeTerminalText(`$ ${request.command}`));
     }

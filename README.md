@@ -1,11 +1,11 @@
 # Sun
 
 Sun is a small TypeScript/Bun coding agent with a terminal UI. It points at an
-OpenAI-compatible model, works directly in the current workspace, and has four
+OpenAI-compatible model, works directly in the current workspace, and has five
 tools:
 
 ```text
-read  edit  write  bash
+read  edit  write  bash  publish
 ```
 
 There is one loop:
@@ -23,6 +23,13 @@ session without removing the sandbox.
 `/goal` is the one thing that outlives a single answer: it gives Sun an
 objective it keeps working toward across turns. The loop is unchanged — a goal
 just decides what the next task is.
+
+`/plan` switches Sun into plan mode, where it investigates with `read` and
+`bash` and proposes a change without making one. `edit`, `write`, and `publish`
+are refused by the tool registry, not merely discouraged in the prompt, so the
+guarantee holds even if the model tries. When the plan arrives you choose
+whether to run it; approving switches back to work mode and hands the plan
+straight back as the next task.
 
 ## Install
 
@@ -181,8 +188,18 @@ being pursued under.
 Sun does not require or store a GitHub login. Child commands do not receive
 common GitHub/GitLab tokens, the SSH agent socket, interactive credential
 prompts, or configured Git credential helpers. Local Git operations still work,
-including status, diff, branches, staging, and commits. Remote fetch/push
-authentication should be performed outside Sun.
+including status, diff, branches, staging, and commits.
+
+Pushing is the one thing that needs the network and your credentials, so it is
+not a Bash command at all — it is the `publish` tool, and it is the only code
+path that runs outside the sandbox. Bash keeps no network access whatsoever.
+`publish` composes its own `git push` argv from a validated remote and branch;
+the model never supplies a command string. Before anything is sent you get an
+approval card naming the remote URL, the branch, and the commits, and that card
+cannot be silenced: `/approvals` auto mode and "stop asking" both stop at it.
+The refspec is always `<approved-sha>:refs/heads/<branch>`, so a later edit
+cannot ride along on an approval you already gave, a deletion refspec is
+unrepresentable, and no force flag is ever assembled.
 
 Approved Bash commands can write only inside the selected workspace. System
 runtimes are mounted read-only, unrelated home files are absent, networking is
@@ -192,7 +209,7 @@ finishes. `HOME` points at a throwaway directory on the sandbox tmpfs, so tools
 that cache or log into `~` leave the workspace clean and Sun's change summary
 only reports your own edits. Terminal-bound model and command text is sanitized before display.
 
-Available slash commands are `/goal`, `/model`, `/approvals`, `/diff`,
+Available slash commands are `/goal`, `/plan`, `/model`, `/approvals`, `/diff`,
 `/files`, `/help`, `/clear`, and `/quit`. Typing `/` at the start of a line
 lists them under the composer, and `@` anywhere completes a workspace path;
 `↑`/`↓` move through the menu and `tab` accepts the highlight. Completing a

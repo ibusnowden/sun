@@ -19,6 +19,12 @@ export interface SelectOption {
 export interface SelectView {
   title: string;
   subtitle?: string;
+  /**
+   * Preformatted lines shown under the subtitle, such as the commit list a
+   * publish would send. Unlike the subtitle these are never reflowed, so
+   * alignment the caller built survives.
+   */
+  detail?: readonly string[];
   options: readonly SelectOption[];
   selected: number;
   /** Overrides the default confirm/cancel line. */
@@ -47,6 +53,12 @@ export function renderSelect(view: SelectView, width: number): string[] {
         (line) => `  ${tone.muted(line)}`,
       ),
     );
+  }
+  if (view.detail?.length) {
+    lines.push("");
+    for (const line of view.detail) {
+      lines.push(`  ${tone.muted(truncate(line, usable - 2))}`);
+    }
   }
   lines.push("");
 

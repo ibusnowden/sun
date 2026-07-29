@@ -3,6 +3,7 @@ import type {
   ApprovalHandler,
   EventSink,
   ModelProvider,
+  RunMode,
   RunResult,
   SunConfig,
   ToolCall,
@@ -16,6 +17,8 @@ import {
   type RepositoryBaseline,
 } from "../repository/inspect.ts";
 import { ToolRegistry } from "../tools/registry.ts";
+import { describePlan, type PublishPlan } from "../tools/publish.ts";
+import { planRefusal } from "./plan.ts";
 
 /** Sun's complete agent loop: decide, run one tool, feed the result back. */
 export class Agent {
@@ -25,6 +28,7 @@ export class Agent {
 
   private constructor(
     readonly config: SunConfig,
+    readonly mode: RunMode,
     readonly provider: ModelProvider,
     readonly approval: ApprovalHandler,
     readonly sink: EventSink,
@@ -40,6 +44,7 @@ export class Agent {
 
   static async create(options: {
     config: SunConfig;
+    mode?: RunMode;
     provider: ModelProvider;
     approval: ApprovalHandler;
     sink?: EventSink;
@@ -47,14 +52,16 @@ export class Agent {
     signal?: AbortSignal;
     history?: AgentEvent[];
   }): Promise<Agent> {
+    const mode = options.mode ?? "work";
     return new Agent(
       options.config,
+      mode,
       options.provider,
       options.approval,
       options.sink ?? (() => {}),
       options.drainSteering ?? null,
       options.signal ?? null,
-      await ToolRegistry.create(options.config),
+      await ToolRegistry.create(options.config, mode),
       options.history ?? [],
     );
   }
@@ -114,7 +121,13 @@ export class Agent {
     this.#events.push({ type: "tool_call", content: call });
 
     let result: ToolResult;
-    if (call.tool === "bash") {
+    if (this.#tools.blockedByMode(call.tool)) {
+      // Refused before the user is asked: an approval prompt for something
+      // plan mode will not run either way is just noise.
+      result = { ok: false, summary: planRefusal(call.tool), output: "" };
+    } else if (call.tool === "publish") {
+      result = await this.#publish(call);
+    } else if (call.tool === "bash") {
       await this.sink({
         type: "approval",
         action: `bash: ${call.rationale}`,
@@ -139,7 +152,7 @@ export class Agent {
     this.#events.push({ type: "tool_result", content: { call, result } });
     await this.sink({ type: "tool_end", call, result });
 
-    if (call.tool !== "read") {
+    if (call.tool !== "read" && call.tool !== "publish") {
       const changes = await repositoryChanges(this.config, baseline);
       await this.sink({
         type: "diff",
@@ -147,6 +160,40 @@ export class Agent {
         patch: changes.diff,
       });
     }
+  }
+
+  /**
+   * The only path out of the sandbox. The plan is resolved first so the user
+   * approves a named remote and a specific commit rather than the word
+   * "publish", and the approval cannot be delegated to auto mode.
+   */
+  async #publish(call: ToolCall): Promise<ToolResult> {
+    let plan: PublishPlan;
+    try {
+      plan = await this.#tools.planPublish(call.input);
+    } catch (error) {
+      return {
+        ok: false,
+        summary: error instanceof Error ? error.message : String(error),
+        output: "",
+      };
+    }
+
+    const action = `publish: ${plan.remote}/${plan.branch}`;
+    const reason =
+      "Publishing runs Git outside Sun's sandbox, using your credentials and network access.";
+    await this.sink({ type: "approval", action, reason });
+    const approved = await this.approval.confirm({
+      action,
+      reason,
+      command: plan.command,
+      detail: describePlan(plan),
+      alwaysAsk: true,
+    });
+    if (!approved) {
+      return { ok: false, summary: "Publish declined", output: "" };
+    }
+    return await this.#tools.publish(plan);
   }
 
   #acceptSteering(): void {

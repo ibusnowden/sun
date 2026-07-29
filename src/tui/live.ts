@@ -402,6 +402,7 @@ export function renderFooter(
           model: view.model,
           repository: view.repository,
           totalTokens: view.totalTokens,
+          mode: view.mode,
           ...(view.goal ? { goal: view.goal } : {}),
         },
         width,
